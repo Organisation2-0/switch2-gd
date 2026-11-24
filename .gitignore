@@ -1,0 +1,10 @@
+build/
+*.nro
+*.elf
+*.nacp
+*.map
+*.o
+*.d
+gd-levels/
+*.png
+!docs/*.png
