@@ -24,7 +24,18 @@ void bot_init(Bot *b)
     b->nodes = 0;
     b->depth_best = 0;
     b->found = 0;
+    b->explore = b->rng = 0;
     b->nhint = 0;
+}
+
+static unsigned g_explore, g_rng;
+
+// While exploring, sometimes prefer the other action (the chance depends on the attempt number).
+static int explore_flip(void)
+{
+    if (!g_explore) return 0;
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return (g_rng >> 16) % 100 < 8u + (g_explore % 5u) * 9u;
 }
 
 // Depth-first search; returns 1 if a plan of the full depth survives from the current state.
@@ -35,6 +46,7 @@ static int dfs(Game *gm, int depth, int prev, float x1)
     game_snap_save(gm, &g_snap[depth], gm->p.x - 100, x1);
     int first = prev;
     if (g_hint && g_hint[depth] >= 0) first = g_hint[depth];
+    if (explore_flip()) first = !first;
     int order[2] = {first, !first};
     for (int i = 0; i < 2; i++) {
         if (--g_budget < 0) break;
@@ -55,7 +67,9 @@ static int dfs(Game *gm, int depth, int prev, float x1)
 
 int bot_decide(Bot *b, Game *gm)
 {
-    const float range = gm->p.speed * ((NEAR_DEPTH * FRAMES_NEAR + (MAX_DEPTH - NEAR_DEPTH) * FRAMES_FAR) / 60.0f) + 250.0f;
+    // everything the look-ahead could touch must be restored afterwards: assume the highest speed,
+    // because a speed portal inside the horizon takes the icon further than the current one
+    const float range = 576.0f * ((NEAR_DEPTH * FRAMES_NEAR + (MAX_DEPTH - NEAR_DEPTH) * FRAMES_FAR) / 60.0f) + 250.0f;
     const float x1 = gm->p.x + range;
     const int input_before = gm->input;
     GameSnap root;
@@ -66,21 +80,38 @@ int bot_decide(Bot *b, Game *gm)
     long used = 0;
     g_hint = b->nhint ? b->hint : NULL;
     int first = g_hint && g_hint[0] >= 0 ? g_hint[0] : b->last;
+    g_explore = b->explore;
+    g_rng = b->rng;
+    if (explore_flip()) first = !first;
     int order[2] = {first, !first};
-    for (int i = 0; i < 2 && !found; i++) {
-        int a = order[i];
-        g_budget = budget_per_root();
-        g_depth_reached = 0;
-        game_snap_restore(gm, &root);
-        int rc = game_sim(gm, a, FRAMES_NEAR);
-        if (rc != 1) {
-            g_path[0] = (signed char)a;
-            if (rc == 2) { found = 1; choice = a; for (int k = 0; k < MAX_DEPTH; k++) g_sol[k] = (signed char)a; }
-            else if (dfs(gm, 1, a, x1)) { choice = a; found = 1; }
-            else if (g_depth_reached > best_reach) { best_reach = g_depth_reached; choice = a; }
+    // a quick search first; only when that finds nothing, a much deeper one (hard passages)
+    static int deep_wait;     // after a failed deep search, wait a few decisions before the next
+    if (deep_wait > 0) deep_wait--;
+    for (int pass = 0; pass < 2 && !found; pass++) {
+        if (pass == 1) {
+            if (deep_wait > 0) break;
+            deep_wait = 8;
         }
-        used += budget_per_root() - g_budget;
+        const long budget = budget_per_root() * (pass ? 12 : 1);
+        int ran_out = 0;
+        for (int i = 0; i < 2 && !found; i++) {
+            int a = order[i];
+            g_budget = budget;
+            g_depth_reached = 0;
+            game_snap_restore(gm, &root);
+            int rc = game_sim(gm, a, FRAMES_NEAR);
+            if (rc != 1) {
+                g_path[0] = (signed char)a;
+                if (rc == 2) { found = 1; choice = a; for (int k = 0; k < MAX_DEPTH; k++) g_sol[k] = (signed char)a; }
+                else if (dfs(gm, 1, a, x1)) { choice = a; found = 1; }
+                else if (g_depth_reached > best_reach) { best_reach = g_depth_reached; choice = a; }
+            }
+            if (g_budget < 0) ran_out = 1;
+            used += budget - g_budget;
+        }
+        if (!ran_out) break;   // the whole tree was searched: more budget cannot help
     }
+    b->rng = g_rng;
     game_snap_restore(gm, &root);
     game_snap_free(&root);
     gm->input = input_before;

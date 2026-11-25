@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Thin SDL2 layer: window, sprite atlases, single textures, bitmap font.
+// Drawing layer: sprite atlases, single textures, bitmap font (platform part: gfx_backend.h).
 #ifndef GD_GFX_H
 #define GD_GFX_H
 
@@ -8,22 +8,24 @@
 #include "atlas.h"
 
 typedef struct { float r, g, b, a; } GdColorF; // 0..255 for rgb, 0..1 for alpha
+typedef struct GfxTex GfxTex;                  // texture of the platform backend
 
 typedef struct {
-    SDL_Renderer *r;
-    SDL_Window *win;
-    SDL_Surface *surf;        // Switch 2: software render target copied to the framebuffer
+    SDL_Window *win;          // NULL on Switch 2
     int mirror;               // draw everything horizontally mirrored inside [0, mir_w]
+    float fade;               // opacity multiplier for sprites (edge transitions)
+    int cut;                  // sprites are cut to the half plane cut_a * x + cut_b * y + cut_c >= 0
+    float cut_a, cut_b, cut_c;
     float mir_w;
     int w, h;                // output size in pixels
     GdAtlas atlas;            // gameplay + UI frames from the shared sheets
-    SDL_Texture *sheet_tex[16];
+    GfxTex *sheet_tex[16];
     char resdir[512];
     const char *suffix;
 } Gfx;
 
 typedef struct {
-    SDL_Texture *tex;
+    GfxTex *tex;
     int w, h;
 } GfxImage;
 
@@ -34,15 +36,23 @@ typedef struct {
     GfxImage img;
 } GfxFont;
 
-// Creates window + renderer and loads the shared sprite sheets from resdir.
+// Opens the screen and loads the shared sprite sheets from resdir.
 int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen);
 void gfx_quit(Gfx *g);
 
-// Shows the finished frame (SDL_RenderPresent on PC, framebuffer copy on Switch 2).
+// Start a frame (clears the screen) / show the finished frame.
+void gfx_begin_frame(Gfx *g);
 void gfx_present(Gfx *g);
+
+// Restricts drawing to a rectangle (NULL = whole screen).
+void gfx_set_clip(Gfx *g, const SDL_Rect *r);
+
+// Copy of the current frame as RGBA, top row first (free() it); NULL on failure.
+unsigned char *gfx_read_pixels(Gfx *g, int *w, int *h);
 
 // Loads a stand-alone PNG from the resources folder (e.g. "GJ_gradientBG-hd.png").
 int gfx_load_image(Gfx *g, const char *file, GfxImage *out);
+void gfx_free_image(GfxImage *im);
 
 // Draws an atlas frame. (cx,cy): screen position of the object origin.
 // sx,sy: screen pixels per sheet pixel (negative flips). rot: degrees clockwise.

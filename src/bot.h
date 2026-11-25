@@ -12,6 +12,7 @@ typedef struct {
     int found;       // 1 if a plan of the full horizon survives
     signed char hint[32];  // previous solution, shifted by one decision
     int nhint;
+    unsigned explore, rng;  // after failures: try the actions in a different (random) order
 } Bot;
 
 void bot_init(Bot *b);

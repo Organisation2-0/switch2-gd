@@ -171,8 +171,8 @@ static void apply_skin(App *a)
 static void load_bg_images(App *a, const Game *gm)
 {
     char name[128];
-    if (a->bg.tex) { SDL_DestroyTexture(a->bg.tex); a->bg.tex = NULL; }
-    if (a->ground.tex) { SDL_DestroyTexture(a->ground.tex); a->ground.tex = NULL; }
+    gfx_free_image(&a->bg);
+    gfx_free_image(&a->ground);
     snprintf(name, sizeof name, "game_bg_%02d_001-hd.png", gm->bg_id);
     if (gfx_load_image(&a->g, name, &a->bg)) gfx_load_image(&a->g, "game_bg_01_001-hd.png", &a->bg);
     snprintf(name, sizeof name, "groundSquare_%02d_001-hd.png", gm->ground_id);
@@ -793,14 +793,16 @@ static void handle_event(App *a, const SDL_Event *e)
 // deaths so that every part of every level is still visited and tested.
 
 #define BOT_MAX_SKIPS 64
-#define BOT_MAX_CP 140
+#define BOT_MAX_CP 220
+#define BOT_MAX_FAILS 80
+#define BOT_MAX_DEATHS 1500
 #define BOT_CP_SPACING 300.0f
 
 typedef struct {
     Bot bot;
     int deaths, attempts_cap;
-    float last_death_x;
-    int same_count;
+    float front_x;                        // furthest place where it failed, and how often
+    int fails;
     float skip_from[BOT_MAX_SKIPS], skip_to[BOT_MAX_SKIPS];
     int nskips;
     unsigned modes;                       // bit per player mode seen
@@ -841,6 +843,30 @@ static void botrun_summary(App *a, BotRun *r, int idx, const char *why)
     fflush(stdout);
 }
 
+// A failure (death, or no surviving plan) sends the bot back to an earlier checkpoint, where it
+// tries other decisions; how far back varies from attempt to attempt. Only when that fails many
+// times at the same place is the stretch skipped.
+static void botrun_retry(App *a, BotRun *r, float x)
+{
+    if (x > r->front_x + 300.0f) { r->front_x = x; r->fails = 0; }
+    r->fails++;
+    if (r->fails > BOT_MAX_FAILS && r->nskips < BOT_MAX_SKIPS) {
+        r->skip_from[r->nskips] = r->front_x - 300;
+        r->skip_to[r->nskips] = r->front_x + 700;
+        r->nskips++;
+        r->fails = 1;
+    }
+    // each round of 13 attempts reaches further back (wrong turns can show up much later)
+    const float back = 150.0f + 230.0f * (float)((r->fails - 1) % 13) + 900.0f * (float)((r->fails - 1) / 13);
+    int k = 0;
+    for (int i = 0; i < r->ncp; i++) if (r->cps[i].s.p.x <= r->front_x - back) k = i;
+    if (r->ncp) { a->game.practice = &r->cps[k]; r->ncp = k + 1; r->next_cp_x = r->cps[k].s.p.x + BOT_CP_SPACING; }
+    bot_init(&r->bot);
+    r->bot.explore = r->fails > 1 ? (unsigned)r->fails : 0;
+    r->bot.rng = (unsigned)(r->fails * 2654435761u) ^ (unsigned)r->front_x;
+    r->nofound = 0;
+}
+
 // Advances the bot-controlled game by one 60 Hz frame. Returns 1 when the level is over.
 static int botrun_frame(App *a, BotRun *r, int idx)
 {
@@ -850,16 +876,20 @@ static int botrun_frame(App *a, BotRun *r, int idx)
     for (int i = 0; i < r->nskips; i++)
         if (gm->p.x >= r->skip_from[i] && gm->p.x <= r->skip_to[i]) noclip = 1;
     gm->noclip = noclip;
+    gm->bot_strict = !noclip;
+    const int stop = getenv("BOT_STOP") != NULL;   // debugging: end at the first failure
     if (!gm->p.dead) {
         if ((r->tick++ & 1) == 0) game_set_hold(gm, bot_decide(&r->bot, gm));
-        // no survivable plan for 1.5 s: the stretch is not playable in this engine -> cruise through it
+        if (r->bot.explore && gm->p.x > r->front_x + 400.0f) r->bot.explore = 0;   // got past it
+        // no survivable plan for 4 s of game time: treat it like a death
         if (!r->bot.found && !gm->noclip) r->nofound++; else if (r->bot.found) r->nofound = 0;
-        if (r->nofound >= 240 && r->nskips < BOT_MAX_SKIPS) {
-            r->skip_from[r->nskips] = gm->p.x - 20;
-            r->skip_to[r->nskips] = gm->p.x + 900;
-            r->nskips++;
-            r->nofound = 0;
-            gm->noclip = 1;
+        if (r->nofound >= 240) {
+            if (stop || getenv("BOT_LOG"))
+                printf("  L%d no plan at x=%.0f y=%.0f mode=%d grav=%d\n", idx + 1, gm->p.x, gm->p.y, gm->p.mode, gm->p.grav);
+            if (stop) { botrun_summary(a, r, idx, "STOPPED"); botrun_end(a, r); return 1; }
+            botrun_retry(a, r, gm->p.x);
+            gm->p.dead = 1;
+            gm->p.dead_t = 1.0f;
         }
         if (gm->noclip) {   // keep the icon in a sane place while ignoring collisions
             Player *pl = &gm->p;
@@ -867,7 +897,7 @@ static int botrun_frame(App *a, BotRun *r, int idx)
                 pl->y = pl->mini ? 9.0f : 15.0f; pl->grav = 1; pl->yv = 0;
             }
         }
-        if (r->bot.found && gm->p.x >= r->next_cp_x && r->ncp < BOT_MAX_CP && !gm->noclip) {
+        if (r->bot.found && !gm->p.dead && gm->p.x >= r->next_cp_x && r->ncp < BOT_MAX_CP && !gm->noclip) {
             game_checkpoint_save(gm, &r->cps[r->ncp++]);
             r->next_cp_x = gm->p.x + BOT_CP_SPACING;
         }
@@ -889,23 +919,12 @@ static int botrun_frame(App *a, BotRun *r, int idx)
     if (gm->p.x > r->max_x) r->max_x = gm->p.x;
     if (!was_dead && gm->p.dead) {
         r->deaths++;
-        if (fabsf(gm->p.x - r->last_death_x) < 450) r->same_count++; else r->same_count = 1;
-        r->last_death_x = gm->p.x;
-        printf("  L%d death %d at x=%.0f y=%.0f g=%d mini=%d dual=%d mode=%s (%s)\n", idx + 1, r->deaths, gm->p.x, gm->p.y, gm->p.grav, gm->p.mini, gm->dual,
-               k_mode_names[gm->p.mode], gm->death_info);
-        {   // respawn at the newest checkpoint that is at least 150 units behind the death
-            int k = 0;
-            float back = 150.0f + BOT_CP_SPACING * (float)(r->same_count - 1);
-            for (int i = 0; i < r->ncp; i++) if (r->cps[i].s.p.x <= gm->p.x - back) k = i;
-            if (r->ncp) { gm->practice = &r->cps[k]; r->ncp = k + 1; r->next_cp_x = r->cps[k].s.p.x + BOT_CP_SPACING; }
-        }
-        if (r->same_count >= 2 && r->nskips < BOT_MAX_SKIPS) {
-            r->skip_from[r->nskips] = gm->p.x - 300;
-            r->skip_to[r->nskips] = gm->p.x + 700;
-            r->nskips++;
-            r->same_count = 0;
-        }
-        if (r->deaths > 150) { botrun_summary(a, r, idx, "GAVE UP"); botrun_end(a, r); return 1; }
+        if (stop || getenv("BOT_LOG"))
+            printf("  L%d death %d at x=%.0f y=%.0f g=%d mini=%d dual=%d mode=%s (%s)\n", idx + 1, r->deaths, gm->p.x,
+                   gm->p.y, gm->p.grav, gm->p.mini, gm->dual, k_mode_names[gm->p.mode], gm->death_info);
+        botrun_retry(a, r, gm->p.x);
+        if (r->deaths > BOT_MAX_DEATHS) { botrun_summary(a, r, idx, "GAVE UP"); botrun_end(a, r); return 1; }
+        if (stop) { botrun_summary(a, r, idx, "STOPPED"); botrun_end(a, r); return 1; }
     }
     return 0;
 }
@@ -914,6 +933,8 @@ static int botrun_frame(App *a, BotRun *r, int idx)
 static int selftest(App *a, int idx, float seconds)
 {
     if (start_level(a, idx) != 0) { puts("load failed"); return 1; }
+    setvbuf(stdout, NULL, _IOLBF, 4096);
+    if (getenv("BOT_LOG")) setvbuf(stdout, NULL, _IONBF, 0);   // keep the log if the run is stopped
     static BotRun r;
     botrun_begin(&r);
     long frames = 0;
@@ -933,8 +954,7 @@ static void bench(App *a, int frames)
     for (int i = 0; i < frames; i++) {
         if (a->scene == SC_PLAY) game_update(&a->game, 1.0f / 60.0f);
         a->t += 1.0f / 60.0f;
-        SDL_RenderSetLogicalSize(a->g.r, (int)UI_W, (int)UI_H);
-        SDL_RenderClear(a->g.r);
+        gfx_begin_frame(&a->g);
         if (a->scene == SC_PLAY) draw_play(a);
         gfx_present(&a->g);
     }
@@ -947,10 +967,8 @@ static void bench(App *a, int frames)
 static int save_shot(App *a, const char *path)
 {
     int w, h;
-    SDL_GetRendererOutputSize(a->g.r, &w, &h);
-    unsigned char *px = malloc((size_t)w * h * 4);
+    unsigned char *px = gfx_read_pixels(&a->g, &w, &h);
     if (!px) return -1;
-    SDL_RenderReadPixels(a->g.r, NULL, SDL_PIXELFORMAT_ABGR8888, px, w * 4);
     for (int i = 0; i < w * h; i++) px[i * 4 + 3] = 255;
     int ok = stbi_write_png(path, w, h, 4, px, w * 4);
     free(px);
@@ -959,9 +977,7 @@ static int save_shot(App *a, const char *path)
 
 static void render(App *a)
 {
-    SDL_SetRenderDrawColor(a->g.r, 0, 0, 0, 255);
-    SDL_RenderClear(a->g.r);
-    SDL_RenderSetLogicalSize(a->g.r, (int)UI_W, (int)UI_H);
+    gfx_begin_frame(&a->g);
     switch (a->scene) {
     case SC_TITLE: draw_title(a); break;
     case SC_SELECT: draw_select(a); break;
@@ -970,6 +986,48 @@ static void render(App *a)
     case SC_CONTROLS: draw_controls(a); break;
     }
     gfx_present(&a->g);
+}
+
+// ------------------------------------------------------------ level tour (visual comparison aid)
+//
+// Runs a level without input and without deaths (like the original game with noclip) and saves a
+// picture each time the player reaches one of the requested progress values (per mille).
+static int tour(App *a, int idx, const char *marks, const char *dir, float extra_len)
+{
+    if (start_level(a, idx) != 0) { puts("load failed"); return 1; }
+    Game *gm = &a->game;
+    const float len = gm->end_x - 380.0f + extra_len;   // progress bar of the original -> position
+    const float scale = (float)a->g.h / VIEW_H, vw = (float)a->g.w / scale;
+    static const float tc1[3] = {0, 255, 255}, tc2[3] = {0, 0, 255};   // colours used in the recordings
+    game_set_skin(gm, &a->g, a->cfg.icon_cube, a->cfg.icon_ship, tc1, tc2);
+    game_reset(gm);
+    for (const char *s = marks; s && *s; ) {
+        const int mark = atoi(s);
+        const float target = len * (float)mark / 1000.0f + 240.0f;
+        for (int frame = 0; gm->p.x < target && !gm->finished && frame < 60 * 600; frame++) {
+            gm->noclip = 1;
+            Player *pl = &gm->p;
+            if (pl->y > 1100.0f || (pl->y > 420.0f && pl->grav < 0 && pl->mode == M_CUBE)) {
+                pl->y = 15.0f; pl->grav = 1; pl->yv = 0;
+            }
+            game_update(gm, 1.0f / 60.0f);
+            // the camera is advanced while drawing too, so draw (without showing) every frame
+            if (frame % 2 == 0 || gm->p.x >= target - 60.0f) {
+                gfx_begin_frame(&a->g);
+                game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+            }
+        }
+        gfx_begin_frame(&a->g);
+        game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+        char path[700];
+        snprintf(path, sizeof path, "%s/p%04d.png", dir, mark);
+        if (save_shot(a, path)) { printf("cannot write %s\n", path); return 1; }
+        printf("p%04d x=%.0f y=%.0f mode=%d\n", mark, gm->p.x, gm->p.y, gm->p.mode);
+        gfx_present(&a->g);
+        const char *c = strchr(s, ',');
+        s = c ? c + 1 : NULL;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -983,6 +1041,8 @@ int main(int argc, char **argv)
     const char *bot_spec = NULL;
     int shot_mirror = 0, shot_mini = 0, shot_flip = 0, shot_dual = 0;
     int bot_speed = 1;
+    const char *tour_marks = NULL, *tour_dir = ".";
+    float tour_len = 0.0f;
     snprintf(a->resdir, sizeof a->resdir, "%s",
 #ifdef __SWITCH__
              "sdmc:/switch/gd/Resources");
@@ -1022,6 +1082,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--mini")) shot_mini = 1;
         else if (!strcmp(argv[i], "--flip")) shot_flip = 1;
         else if (!strcmp(argv[i], "--dual")) shot_dual = 1;
+        else if (!strcmp(argv[i], "--tour") && i + 1 < argc) tour_marks = argv[++i];
+        else if (!strcmp(argv[i], "--tourdir") && i + 1 < argc) tour_dir = argv[++i];
+        else if (!strcmp(argv[i], "--tourlen") && i + 1 < argc) tour_len = (float)atof(argv[++i]);
     }
 #ifdef __SWITCH__
     // Log to the SD card so a failed start can be diagnosed.
@@ -1029,7 +1092,8 @@ int main(int argc, char **argv)
     setvbuf(stderr, NULL, _IONBF, 0);
     fprintf(stderr, "gd-switch2 start, res=%s\n", a->resdir);
 #endif
-    int rc_init = gfx_init(&a->g, a->resdir, 1280, 720, fullscreen);
+    // the tour renders in 16:10 like the recordings of the original game
+    int rc_init = gfx_init(&a->g, a->resdir, 1280, tour_marks ? 800 : 720, fullscreen);
     if (rc_init != 0) {
         fprintf(stderr, "init failed rc=%d (resources: %s)\n", rc_init, a->resdir);
 #ifdef __SWITCH__
@@ -1077,6 +1141,11 @@ int main(int argc, char **argv)
     SDL_ShowCursor(SDL_ENABLE);
 #endif
 
+    if (tour_marks) {
+        int rc = tour(a, level, tour_marks, tour_dir, tour_len);
+        gfx_quit(&a->g);
+        return rc;
+    }
     if (selftest_level >= 0) {
         int rc = selftest(a, selftest_level, selftest_secs);
         gfx_quit(&a->g);

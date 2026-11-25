@@ -11,11 +11,11 @@ typedef enum { OT_DECO, OT_SOLID, OT_HAZARD, OT_PORTAL, OT_PAD, OT_ORB, OT_SPEED
 
 // Portal kinds (Obj.sub for OT_PORTAL)
 enum { P_GRAV_DOWN = 1, P_GRAV_UP, P_CUBE, P_SHIP, P_BALL, P_UFO, P_WAVE, P_SIZE_NORMAL, P_SIZE_MINI,
-       P_MIRROR_ON, P_MIRROR_OFF, P_DUAL_ON, P_DUAL_OFF, P_ROBOT, P_SPIDER, P_OTHER };
+       P_MIRROR_ON, P_MIRROR_OFF, P_DUAL_ON, P_DUAL_OFF, P_ROBOT, P_SPIDER, P_OTHER, P_TELEPORT };
 // Player modes
 enum { M_CUBE = 0, M_SHIP, M_BALL, M_UFO, M_WAVE, M_ROBOT, M_SPIDER };
 // Pad / orb kinds
-enum { K_YELLOW = 1, K_BLUE, K_PINK, K_GREEN, K_RED };
+enum { K_YELLOW = 1, K_BLUE, K_PINK, K_GREEN, K_RED, K_BLACK, K_DASH, K_DASH_FLIP };
 
 #define CH_COUNT 1100
 #define CH_BG 1000
@@ -36,6 +36,7 @@ typedef struct {
     int fading;
     int copy, copy_op, player;       // copy another channel (+ its opacity) / follow player colour 1 or 2
     int hsv_on, sadd, vadd;
+    int lbg;                         // default "light background" channel: mix of background and colour 1
     float hs, ss, vs;                // hue shift (degrees), saturation and value factor/offset
 } Channel;
 
@@ -56,12 +57,24 @@ typedef struct {
     // groups, moving objects and the extra trigger types (move, toggle, alpha, spawn)
     short grp[6];
     unsigned char ngrp, mover, off, spawn_only;
-    float x0, y0;                  // initial position (movers are put back on every attempt)
+    float x0, y0, rot0;            // initial position and rotation (movers are put back on every attempt)
     int tid;                       // trigger object id
     int tgroup, teasing, tact, tcopy; // target group, easing type, toggle: 1 = on, colour copy channel
     float tdx, tdy, trate, tdelay;
+    float trot;                    // rotate trigger: degrees
+    int tcenter;                   // rotate trigger: group of the pivot object
+    unsigned char tlockx, tlocky;  // move trigger: follow the player horizontally / vertically
     int kidset;                    // index into Game.kidsets (child sprites), -1 = none
     float spin;                    // continuous rotation (degrees per second), saw blades
+    unsigned char touch, tplayer;  // trigger: fires on contact only / uses player colour 1 or 2
+    unsigned char tground;         // background trigger that also colours the ground
+    float pin, phold, pout, phue;  // pulse trigger timing and hue shift
+    unsigned char pgroup, pcopy, ponly;
+    const GdFrame *glow;           // soft light drawn behind the object
+    const GdFrame *ball;           // pulsing ball above a rod
+    unsigned char breakable;       // solid that breaks instead of killing
+    unsigned char clipw;           // textured slope decoration: width of the triangle its sprites are cut to
+    unsigned char slope;           // triangle: 0 = none, else 1 | 2 (right angle on the right) | 4 (ceiling)
     const GdFrame *fx1, *fx2;      // portal swirl sprites
 } Obj;
 
@@ -71,8 +84,18 @@ typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; } Partic
 typedef struct { const GdChild *c; int n; const GdFrame *f[12]; } KidSet;
 #define GD_MAX_MOVES 64
 #define GD_MAX_SPAWNS 64
-typedef struct { int group, easing; float dx, dy, dur, t, rate, done; } Move;
+typedef struct {
+    int group, easing, center;     // center > 0: pivot group of a rotation
+    float dx, dy, dur, t, rate, done, rot, lx, ly;   // lx, ly: last player position (locked moves)
+    unsigned char lockx, locky;
+} Move;
 typedef struct { int obj; float left; } PendingSpawn;
+#define GD_MAX_PULSES 96
+typedef struct {   // pulse trigger: a colour flashed onto a channel or a group (visual only)
+    int target, group, copy, only;      // only: 1 = main sprite, 2 = detail sprite, 0 = both
+    float r, g, b, hue, in, hold, out, t;
+} Pulse;
+typedef struct { int group; float from, to, dur, t; } AlphaFade;
 
 typedef struct {
     float x, y, vy;  // vy: px/s, derived from yv (for display/bots only)
@@ -84,6 +107,8 @@ typedef struct {
     int on_ground, dead, hold;
     int rising, queued;   // OpenGD m_isRising, _queuedHold
     int touch_ring, touch_pad;
+    int dashing;             // holding a dash orb: straight flight with this slope
+    float dash_slope;
     float rot, flame;
     float rot_left, rot_rate, rot_dir; // running 180 degree rotation action
     int snap;             // rotating back to a multiple of 90 degrees
@@ -118,11 +143,15 @@ typedef struct {
     int dual;
     int input;                    // physical button state (edge detection)
     int noclip, sim;              // test aids: ignore deaths / running a look-ahead rollout
+    int bot_strict;               // test bot: missing a form portal counts as a death
     const void *practice;         // GameCheckpoint to respawn at instead of the level start (or NULL)
     float ctr;                    // camera centre for restricted modes (OpenGD m_fCameraYCenter)
     Particle pt[GD_MAX_PART]; int npt;   // visual-only particles (not part of snapshots)
     float anim_t, emit_t;         // render time for idle animations, particle emit timer
     int dead_fx;                  // death burst already spawned
+    int enter_fx;                 // id of the active enter effect trigger (0 = fade)
+    Pulse pu[GD_MAX_PULSES]; int npu;
+    AlphaFade af[GD_MAX_PULSES]; int naf;
     float ground_y, ceil_y;       // drawn floor line / ceiling (world units); ceil_y < 0 + flag below
     int has_ceil;
     int mirror;                   // mirror portal active
@@ -162,7 +191,7 @@ typedef struct {
     int lo, n;                // range of by_x indices whose flags are saved
     unsigned char *flags;     // 4 bytes per object: used, used2, tdone, off
     int cap;
-    float *mpos;              // movers: x, y
+    float *mpos;              // movers: x, y, rotation
     unsigned char *mflags;    // movers: used, used2, tdone, off
     int nm, mcap;
     Move mv[GD_MAX_MOVES]; int nmv;
