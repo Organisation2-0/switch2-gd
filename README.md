@@ -5,7 +5,7 @@ homebrew (libounce / kaiHEN) and for Windows. It contains **no game assets**: it
 sprites, fonts and levels from **your own copy** of Geometry Dash (Steam).
 
 > Not affiliated with RobTop Games. You need a legal copy of Geometry Dash.
-> Version **1.0** is a hobby-grade first release, see *Known issues* below.
+> Version **1.0.1** is a hobby-grade release, see *Known issues* below.
 
 ## Features (v1.0)
 
@@ -32,9 +32,13 @@ sprites, fonts and levels from **your own copy** of Geometry Dash (Steam).
   verified with a mostly-cube bot run.
 - Default colours of some decorations follow OpenGD's tables and may differ from the original.
 - Physics and hitboxes were compared with OpenGD, not with the original game.
-- **Switch 2:** the software-rendering path (SDL surface copied to the libnx framebuffer) has
-  **not been verified on hardware** after the latest changes; memory use is about 85 MB for the
-  sprite sheets. If it fails, check `sdmc:/switch/gd/log.txt` and open an issue.
+- **Switch 2:** the app starts and runs on hardware, but rendering happens entirely on the CPU:
+  - it **lags heavily**;
+  - some sprites are drawn rotated, misplaced or distorted;
+  - behind the mirror portal many textures (for example the background) show other sprites.
+
+  Memory use is about 85 MB for the sprite sheets. If the app fails to start, check
+  `sdmc:/switch/gd/log.txt` and open an issue.
 
 ## Build (Windows)
 

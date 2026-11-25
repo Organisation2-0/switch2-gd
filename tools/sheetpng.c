@@ -46,9 +46,9 @@ static void number(int x, int y, int v)
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: sheetpng resdir out.png substr...\n"); return 2; }
-    const char *sheets[] = {"GJ_GameSheet", "GJ_GameSheet02", "GJ_GameSheet03", "GJ_GameSheet04"};
+    const char *sheets[] = {"GJ_GameSheet", "GJ_GameSheet02", "GJ_GameSheet03", "GJ_GameSheet04", "GJ_ParticleSheet"};
     GdAtlas a;
-    if (gd_atlas_load(&a, argv[1], "-hd", sheets, 4)) return 1;
+    if (gd_atlas_load(&a, argv[1], "-hd", sheets, 5)) return 1;
 
     int *pick = malloc(sizeof(int) * (size_t)a.nframes), n = 0;
     for (int i = 0; i < a.nframes; i++) {

@@ -207,6 +207,11 @@ static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
     o->detail = sibling(g, fr, "_001.png", "_2_001.png");
     if (!o->detail) o->detail = sibling(g, fr, "_001.png", "_color_001.png");
     o->extra = sibling(g, fr, "_001.png", "_extra_001.png");
+    o->spin = 0;
+    if (starts(fr, "sawblade_01")) o->spin = -200.0f;
+    else if (starts(fr, "sawblade_02")) o->spin = -240.0f;
+    else if (starts(fr, "sawblade_03")) o->spin = -300.0f;
+    else if (starts(fr, "spinBlade") || starts(fr, "blade_")) o->spin = -360.0f;
     o->type = OT_DECO;
     o->hw = w * 0.5f; o->hh = h * 0.5f; o->hx = o->hy = 0;
 
@@ -214,6 +219,14 @@ static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->type = OT_PORTAL;
         o->sub = portal_kind(src->id);
         o->back = sibling(g, fr, "_front_001.png", "_back_001.png");
+        if (strlen(fr) > 9) {
+            char nm[80];
+            memcpy(nm, fr, 9); nm[9] = 0;
+            strcat(nm, "_extra_001.png");
+            o->fx1 = gfx_find(g, nm);
+            nm[9] = 0; strcat(nm, "_extra_2_001.png");
+            o->fx2 = gfx_find(g, nm);
+        }
         o->hw = 15; o->hh = h * 0.5f;
     } else if (starts(fr, "boost_")) {
         o->type = OT_SPEED;
@@ -500,6 +513,7 @@ void game_free(Game *gm)
 
 void game_reset(Game *gm)
 {
+    gm->npt = 0; gm->dead_fx = 0; gm->emit_t = 0;
     Player *p = &gm->p;
     memset(p, 0, sizeof *p);
     memset(&gm->p2, 0, sizeof gm->p2);
@@ -531,6 +545,7 @@ void game_reset(Game *gm)
     gm->finished = 0;
     gm->cam_x = -190;
     gm->cam_bottom = p->mode == M_CUBE ? -90.0f : gm->ctr - 250.0f;
+    gm->cam_target = gm->cam_bottom + 90.0f;
     if (gm->ch0_valid) memcpy(gm->ch, gm->ch0, sizeof gm->ch);
     gm->acc = 0;
     gm->prev_x = p->x; gm->prev_y = p->y; gm->prev_rot = 0;
@@ -552,6 +567,115 @@ static void die_why(Game *gm, const char *why, const Obj *o)
 }
 
 #define die(gm) die_why(gm, "?", NULL)
+
+// ---------------------------------------------------------------- particles (visual only)
+
+static unsigned fx_rng = 2463534242u;
+static float frand(void)
+{
+    fx_rng = fx_rng * 1664525u + 1013904223u;
+    return (float)(fx_rng >> 8) / 16777216.0f;
+}
+
+static void emit(Game *gm, float x, float y, float vx, float vy, float life, float size, float grow,
+                 float r, float g, float b, float a)
+{
+    if (gm->sim) return;
+    if (gm->npt >= GD_MAX_PART) return;
+    Particle *p = &gm->pt[gm->npt++];
+    p->x = x; p->y = y; p->vx = vx; p->vy = vy;
+    p->life = p->max = life; p->size = size; p->grow = grow;
+    p->r = r; p->g = g; p->b = b; p->a = a;
+}
+
+static void emit_burst(Game *gm, float x, float y, int n, float speed, float life, float size,
+                       float r, float g, float b)
+{
+    for (int i = 0; i < n; i++) {
+        float ang = frand() * 6.2831853f, sp = speed * (0.3f + 0.7f * frand());
+        emit(gm, x, y, cosf(ang) * sp, sinf(ang) * sp, life * (0.6f + 0.4f * frand()), size * (0.6f + 0.6f * frand()),
+             -size * 0.8f / life, r, g, b, 1.0f);
+    }
+}
+
+static void kind_rgb(int kind, float *r, float *g, float *b)
+{
+    switch (kind) {
+    case K_YELLOW: *r = 255; *g = 220; *b = 40; break;
+    case K_BLUE: *r = 60; *g = 170; *b = 255; break;
+    case K_PINK: *r = 255; *g = 90; *b = 200; break;
+    case K_GREEN: *r = 80; *g = 255; *b = 80; break;
+    default: *r = 255; *g = 60; *b = 60; break;
+    }
+}
+
+static void portal_rgb(int sub, float *r, float *g, float *b)
+{
+    switch (sub) {
+    case P_GRAV_DOWN: case P_MIRROR_OFF: *r = 60; *g = 170; *b = 255; break;
+    case P_GRAV_UP: case P_MIRROR_ON: *r = 255; *g = 230; *b = 60; break;
+    case P_CUBE: case P_SIZE_NORMAL: *r = 80; *g = 255; *b = 100; break;
+    case P_SHIP: case P_SIZE_MINI: *r = 255; *g = 90; *b = 200; break;
+    case P_BALL: case P_UFO: case P_DUAL_ON: *r = 255; *g = 150; *b = 30; break;
+    case P_WAVE: case P_DUAL_OFF: *r = 40; *g = 200; *b = 255; break;
+    default: *r = 255; *g = 255; *b = 255; break;
+    }
+}
+
+static void death_fx(Game *gm)
+{
+    if (gm->sim || gm->dead_fx) return;
+    gm->dead_fx = 1;
+    float x = gm->p.x, y = gm->p.y;
+    emit(gm, x, y, 0, 0, 0.35f, 30.0f, 520.0f, gm->c1[0], gm->c1[1], gm->c1[2], 0.9f);   // shock ring (soft disc)
+    emit_burst(gm, x, y, 26, 260.0f, 0.7f, 12.0f, gm->c1[0], gm->c1[1], gm->c1[2]);
+    emit_burst(gm, x, y, 14, 180.0f, 0.6f, 10.0f, gm->c2[0], gm->c2[1], gm->c2[2]);
+}
+
+// Idle emitters of the player icon (ship flame, ground dust, wave sparks), run once per step.
+static void player_fx(Game *gm, const Player *p, int was_ground)
+{
+    if (gm->sim || p->dead) return;
+    const float k = p->mini ? 0.6f : 1.0f, gsign = (float)p->grav;
+    if (p->on_ground && !was_ground && (p->mode == M_CUBE || p->mode == M_ROBOT || p->mode == M_BALL || p->mode == M_SPIDER)) {
+        float fy = p->y - 14.0f * k * gsign;   // landing puff
+        for (int i = 0; i < 6; i++)
+            emit(gm, p->x - 6 + frand() * 12, fy, (frand() - 0.7f) * 90.0f, gsign * (15.0f + frand() * 40.0f), 0.4f,
+                 7.0f * k, -9.0f, 255, 255, 255, 0.55f);
+    }
+    gm->emit_t += STEP;
+    if (gm->emit_t < 0.012f) return;
+    gm->emit_t = 0;
+    float a = p->rot * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
+    if (p->mode == M_SHIP || p->mode == M_UFO) {
+        float dx = (p->mode == M_SHIP ? -17.0f : -8.0f) * k, dy = (p->mode == M_SHIP ? -3.0f : -11.0f) * k * gsign;
+        float wx = dx * c + dy * s, wy = -dx * s + dy * c;
+        if (p->mode == M_SHIP && (p->hold || 1))
+            emit(gm, p->x + wx, p->y + wy, -70.0f - frand() * 50.0f, (frand() - 0.5f) * 50.0f, 0.28f, 11.0f * k, -30.0f,
+                 255, 150 + frand() * 60.0f, 30, 0.9f);
+        else if (p->mode == M_UFO && p->hold)
+            emit(gm, p->x + wx, p->y + wy, -30.0f * frand(), -gsign * (40.0f + frand() * 30.0f), 0.3f, 7.0f * k, -15.0f, 255, 255, 255, 0.7f);
+    } else if (p->mode == M_WAVE) {
+        emit(gm, p->x, p->y, -40.0f * frand(), (frand() - 0.5f) * 60.0f, 0.3f, 8.0f * k, -20.0f, gm->c1[0], gm->c1[1], gm->c1[2], 0.8f);
+    } else if (p->on_ground && p->mode != M_ROBOT) {   // faint dust trail while sliding along the floor
+        emit(gm, p->x - 12 * k, p->y - 14.0f * k * gsign, -50.0f - frand() * 30.0f, gsign * (5.0f + frand() * 25.0f), 0.35f,
+             5.0f * k, -8.0f, 255, 255, 255, 0.35f);
+    }
+}
+
+static void particles_step(Game *gm, float dt)
+{
+    for (int i = 0; i < gm->npt;) {
+        Particle *p = &gm->pt[i];
+        p->life -= dt;
+        if (p->life <= 0) { *p = gm->pt[--gm->npt]; continue; }
+        p->x += p->vx * dt;
+        p->y += p->vy * dt;
+        p->size += p->grow * dt;
+        if (p->size < 1.0f) p->size = 1.0f;
+        i++;
+    }
+}
 
 void game_set_hold(Game *gm, int down)
 {
@@ -724,8 +848,10 @@ static int is_restricted(const Game *gm, const Player *p)
 static void region(const Game *gm, const Player *p, float *fl, float *ce)
 {
     float f, c;
-    if (p->mode == M_BALL || p->mode == M_SPIDER) { f = gm->ctr - 195.0f; c = gm->ctr + 16.0f; }
-    else { f = gm->ctr - 225.0f; c = gm->ctr + 46.0f; }
+    // The floor follows the (smoothed) camera like OpenGD's bottom ground, the ceiling follows
+    // the camera centre directly. cam_target is the physics copy of the camera (OpenGD coordinates).
+    if (p->mode == M_BALL || p->mode == M_SPIDER) { f = gm->cam_target - 35.0f; c = gm->ctr + 16.0f; }
+    else { f = gm->cam_target - 65.0f; c = gm->ctr + 46.0f; }
     if (p->mini) { f -= 6.0f; c += 6.0f; }
     *fl = f; *ce = c;
 }
@@ -1036,6 +1162,11 @@ static void apply_portal(Game *gm, Player *p, Obj *o)
         set_mode(p, mode);
         if (is1) set_ctr(gm, mode, o->y);
     }
+    {
+        float r, g, b;
+        portal_rgb(o->sub, &r, &g, &b);
+        emit_burst(gm, o->x, o->y, 14, 140.0f, 0.5f, 9.0f, r, g, b);
+    }
 }
 
 static void trail_push(Player *p)
@@ -1132,11 +1263,13 @@ static void check_collisions(Game *gm, Player *p)
                 if (o->sub == K_BLUE) {
                     if (p->touch_pad) break;
                     *used = 1;
+                    { float r, g, b; kind_rgb(o->sub, &r, &g, &b); emit_burst(gm, o->x, o->y - 6, 10, 130.0f, 0.4f, 8.0f, r, g, b); }
                     propel(p, 0.8);
                     p->touch_pad = 1;
                     flip_gravity(p, !is_flipped(p));
                 } else {
                     *used = 1;
+                    { float r, g, b; kind_rgb(o->sub, &r, &g, &b); emit_burst(gm, o->x, o->y - 6, 10, 130.0f, 0.4f, 8.0f, r, g, b); }
                     propel(p, o->sub == K_YELLOW ? 1.0 : o->sub == K_PINK ? 0.65 : 1.25);
                     p->touch_pad = 1;
                 }
@@ -1149,7 +1282,16 @@ static void check_collisions(Game *gm, Player *p)
                     break;
                 }
                 p->touch_ring = 1;
-                ring_jump(p, o, used);
+                {
+                    int was_used = *used;
+                    ring_jump(p, o, used);
+                    if (!was_used && *used) {
+                        float r, g, b;
+                        kind_rgb(o->sub, &r, &g, &b);
+                        emit(gm, o->x, o->y, 0, 0, 0.3f, 14.0f, 140.0f, r, g, b, 0.9f);
+                        emit_burst(gm, o->x, o->y, 12, 150.0f, 0.45f, 8.0f, r, g, b);
+                    }
+                }
                 break;
             default: break;
             }
@@ -1258,14 +1400,27 @@ static void step(Game *gm, float d)
     (void)d;
     if (gm->p.dead) return;
     gm->time += STEP;
+    if (is_restricted(gm, &gm->p)) {   // physics copy of the camera lerp (0.1 per 60 Hz frame)
+        float tgt = fmaxf(0.0f, gm->ctr - 160.0f);
+        if (tgt > 820.0f) tgt = 820.0f;
+        gm->cam_target += (tgt - gm->cam_target) * (1.0f - powf(0.9f, STEP * 60.0f));
+    } else {
+        gm->cam_target = gm->cam_bottom + 90.0f;
+    }
     triggers_step(gm);
-    step_player(gm, &gm->p);
-    if (gm->dual && !gm->p.dead) step_player(gm, &gm->p2);
+    {
+        int g1 = gm->p.on_ground, g2 = gm->p2.on_ground;
+        step_player(gm, &gm->p);
+        player_fx(gm, &gm->p, g1);
+        if (gm->dual && !gm->p.dead) { step_player(gm, &gm->p2); player_fx(gm, &gm->p2, g2); }
+    }
 }
 
 void game_update(Game *gm, float dt)
 {
     if (dt > 0.1f) dt = 0.1f;
+    gm->anim_t += dt;
+    particles_step(gm, dt);
     // colour channel fades run on real time
     for (int i = 0; i < CH_COUNT; i++) {
         Channel *c = &gm->ch[i];
@@ -1281,10 +1436,11 @@ void game_update(Game *gm, float dt)
 
     if (gm->p.dead) {
         gm->p.dead_t += dt;
+        death_fx(gm);
         if (gm->p.dead_t > 1.0f) { // restart attempt
             int att = gm->attempts + 1;
             float best = gm->best_percent;
-            if (gm->practice) { const GameCheckpoint *cp = gm->practice; game_checkpoint_restore(gm, cp); gm->p.dead = 0; gm->p.dead_t = 0; gm->p.hold = gm->p.queued = gm->input; }
+            if (gm->practice) { const GameCheckpoint *cp = gm->practice; game_checkpoint_restore(gm, cp); gm->dead_fx = 0; gm->npt = 0; gm->p.dead = 0; gm->p.dead_t = 0; gm->p.hold = gm->p.queued = gm->input; }
             else game_reset(gm);
             gm->attempts = att;
             gm->best_percent = best;
@@ -1436,10 +1592,18 @@ static void draw_kid(Game *gm, Gfx *g, const Obj *o, const GdChild *k, const GdF
               o->sx * k->sx * (k->flipx ? -1.0f : 1.0f) * s, o->sy * k->sy * (k->flipy ? -1.0f : 1.0f) * s, col, (int)add);
 }
 
+static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, float oa);
+
 static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, int pass)
 {
     float add;
     float oa = 1.0f;
+    Obj spun;
+    if (o->spin != 0) {   // rotating saw blades
+        spun = *o;
+        spun.rot += o->spin * gm->anim_t;
+        o = &spun;
+    }
     for (int k = 0; k < o->ngrp; k++) oa *= gm->galpha[o->grp[k]];
     if (oa <= 0.003f) return;
     GdColorF col = chan_color(gm, o->ch_main, &add);
@@ -1447,6 +1611,7 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     if (o->type == OT_PORTAL) {
         if (pass == 0 && o->back) gfx_frame(g, o->back, cx, cy, o->rot, o->sx * s, o->sy * s, col, 0);
         if (pass == 1 && o->main) gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s, o->sy * s, col, 0);
+        if (pass == 1) draw_portal_fx(gm, g, o, cx, cy, s, oa);
         return;
     }
     if (o->kidset >= 0) {
@@ -1457,10 +1622,54 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
         return;
     }
     if (o->main) gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s, o->sy * s, col, (int)add);
+    if (o->main && (o->type == OT_ORB || o->type == OT_PAD)) {   // idle pulse: an expanding, fading copy
+        const int orb = o->type == OT_ORB;
+        for (int k = 0; k < (orb ? 2 : 1); k++) {
+            float ph = fmodf(gm->anim_t * (orb ? 1.25f : 1.0f) + o->x * 0.0137f + k * 0.5f, 1.0f);
+            float grow = orb ? 0.8f + 0.7f * ph : 1.0f + 0.25f * ph;
+            GdColorF pc = col;
+            pc.a *= (orb ? 0.6f : 0.5f) * (1.0f - ph);
+            gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s * grow, o->sy * s * (orb ? grow : 1.0f + 0.9f * ph), pc, 1);
+        }
+    }
     if (o->detail) {
         GdColorF dc = chan_color(gm, o->ch_detail, &add);
         dc.a *= oa;
         gfx_frame(g, o->detail, cx, cy, o->rot, o->sx * s, o->sy * s, dc, (int)add);
+    }
+}
+
+// Animated portal decoration: swirl sprites that pulse and slide, plus dots drawn into the portal.
+static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, float oa)
+{
+    float pr, pg, pb;
+    portal_rgb(o->sub, &pr, &pg, &pb);
+    GdColorF c = {pr, pg, pb, oa};
+    const float t = gm->anim_t, ppu = g->atlas.px_per_unit, w2s = s * ppu;
+    const float flip = o->sx < 0 ? -1.0f : 1.0f;
+    if (o->fx1) {
+        float ph = fmodf(t * 0.9f + o->y * 0.01f, 1.0f);
+        GdColorF a = c;
+        a.a *= sinf(ph * 3.14159265f);
+        gfx_frame(g, o->fx1, cx, cy, o->rot, o->sx * s * (1.15f - 0.3f * ph), o->sy * s, a, 1);
+    }
+    if (o->fx2) {
+        float ph = fmodf(t * 0.9f + 0.5f + o->y * 0.01f, 1.0f);
+        GdColorF a = c;
+        a.a *= sinf(ph * 3.14159265f);
+        gfx_frame(g, o->fx2, cx + flip * (ph - 0.5f) * 10.0f * w2s, cy, o->rot, o->sx * s * (0.9f + 0.2f * ph), o->sy * s, a, 1);
+    }
+    // dots drifting into the portal
+    const float hh = o->hh > 8 ? o->hh : 30.0f;
+    for (int i = 0; i < 6; i++) {
+        float ph = fmodf(t * 0.8f + i / 6.0f + o->x * 0.0071f, 1.0f);
+        float ang = i * 2.399f + o->x * 0.37f;
+        float r = 1.0f - ph;
+        float dx = cosf(ang) * 34.0f * r * flip, dy = sinf(ang) * hh * r;
+        float sz = 5.0f * (0.5f + 0.5f * r) * w2s;
+        GdColorF d = c;
+        d.a *= sinf(ph * 3.14159265f);
+        gfx_fill(g, (SDL_FRect){cx + dx * w2s - sz / 2, cy - dy * w2s - sz / 2, sz, sz}, d);
     }
 }
 
@@ -1662,6 +1871,24 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
         }
     }
 
+    // particles (additive soft discs)
+    {
+        const GdFrame *pf = gfx_find(g, "particle_02_001.png"), *pring = gfx_find(g, "particle_07_001.png");
+        for (int i = 0; i < gm->npt; i++) {
+            const Particle *p = &gm->pt[i];
+            float k = p->life / p->max;
+            GdColorF pc = {p->r, p->g, p->b, p->a * k};
+            float sz = p->size * scale;
+            const GdFrame *use = p->grow > 100.0f && pring ? pring : pf;   // fast-growing = shock ring
+            if (use) {
+                float f = sz / (float)(use->srcw > 0 ? use->srcw : use->w);
+                gfx_frame(g, use, SX(p->x), SY(p->y), 0, f, f, pc, 1);
+            } else {
+                gfx_fill(g, (SDL_FRect){SX(p->x) - sz / 2, SY(p->y) - sz / 2, sz, sz}, pc);
+            }
+        }
+    }
+
     // pass 1: front layers and portal fronts
     for (int k = 0; k < gm->n; k++) {
         const Obj *o = &gm->obj[gm->by_z[k]];
@@ -1689,7 +1916,7 @@ void game_snap_save(const Game *gm, GameSnap *s, float x0, float x1)
 {
     s->p = gm->p; s->p2 = gm->p2;
     s->dual = gm->dual; s->mirror = gm->mirror; s->input = gm->input;
-    s->ctr = gm->ctr; s->acc = gm->acc; s->time = gm->time;
+    s->ctr = gm->ctr; s->cam_f = gm->cam_target; s->acc = gm->acc; s->time = gm->time;
     s->prev_x = gm->prev_x; s->prev_y = gm->prev_y; s->prev_rot = gm->prev_rot;
     int lo = first_index(gm, x0), hi = first_index(gm, x1);
     s->lo = lo;
@@ -1731,7 +1958,7 @@ void game_snap_restore(Game *gm, const GameSnap *s)
 {
     gm->p = s->p; gm->p2 = s->p2;
     gm->dual = s->dual; gm->mirror = s->mirror; gm->input = s->input;
-    gm->ctr = s->ctr; gm->acc = s->acc; gm->time = s->time;
+    gm->ctr = s->ctr; gm->cam_target = s->cam_f; gm->acc = s->acc; gm->time = s->time;
     gm->prev_x = s->prev_x; gm->prev_y = s->prev_y; gm->prev_rot = s->prev_rot;
     for (int i = 0; i < s->n; i++) {
         Obj *o = &gm->obj[gm->by_x[s->lo + i]];

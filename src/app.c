@@ -880,6 +880,7 @@ static int botrun_frame(App *a, BotRun *r, int idx)
             printf("    x=%.1f y=%.1f yv=%.2f g=%d hold=%d og=%d rise=%d mode=%d found=%d\n", gm->p.x, gm->p.y,
                    gm->p.yv, gm->p.grav, gm->p.hold, gm->p.on_ground, gm->p.rising, gm->p.mode, r->bot.found);
     }
+    if (getenv("GDCAM") && ((int)gm->p.x % 60) < 3) printf("CAM x=%.0f y=%.0f cam=%.0f ctr=%.0f mode=%d dual=%d mini=%d grav=%d\n", gm->p.x, gm->p.y, gm->cam_bottom, gm->ctr, gm->p.mode, gm->dual, gm->p.mini, gm->p.grav);
     r->modes |= 1u << gm->p.mode;
     if (gm->dual) r->saw_dual = 1;
     if (gm->mirror) r->saw_mirror = 1;
@@ -1033,9 +1034,17 @@ int main(int argc, char **argv)
         fprintf(stderr, "init failed rc=%d (resources: %s)\n", rc_init, a->resdir);
 #ifdef __SWITCH__
         // Show the error on screen instead of a black screen.
+        char sdl_err[256];
+        snprintf(sdl_err, sizeof sdl_err, "%s", SDL_GetError());
+        gfx_quit(&a->g);   // releases the screen so that the console can use it
         consoleInit(NULL);
-        printf("Geometry Dash (fan port): start failed\n\nerror %d\nresources: %s\n\n", rc_init, a->resdir);
-        printf("-4/-5 = sprite sheets missing in that folder.\nSee sdmc:/switch/gd/log.txt\n\nPress + to exit.\n");
+        printf("Geometry Dash (fan port): start failed\n\nerror %d: %s\n", rc_init,
+               rc_init == -4   ? "cannot load the sprite sheets"
+               : rc_init == -5 ? "cannot create textures (out of memory?)"
+                               : "cannot set up graphics");
+        if (rc_init == -4) printf("resources: %s\n", a->resdir);
+        else printf("SDL: %s\n", sdl_err);
+        printf("\nDetails: sdmc:/switch/gd/log.txt\n\nPress + to exit.\n");
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
         PadState ep;
         padInitializeDefault(&ep);
@@ -1185,6 +1194,21 @@ int main(int argc, char **argv)
                          a->levels[bot_list[bot_pos]].name, brun.deaths, brun.nskips, m);
             }
             render(a);
+            {   // development aid: GDSHOTS="x1,x2,..." saves a screenshot when the player passes each x
+                static const char *sp;
+                static int init;
+                if (!init) { sp = getenv("GDSHOTS"); init = 1; }
+                if (sp && *sp) {
+                    float nx = (float)atof(sp);
+                    if (a->game.p.x >= nx) {
+                        char fn[64];
+                        snprintf(fn, sizeof fn, "shot_%d.png", (int)nx);
+                        save_shot(a, fn);
+                        const char *c = strchr(sp, ',');
+                        sp = c ? c + 1 : "";
+                    }
+                }
+            }
             continue;
         }
         if (a->scene == SC_PLAY && !a->paused) game_update(&a->game, dt_smooth);

@@ -32,8 +32,9 @@ int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
 #ifdef __SWITCH__
     // Switch 2: the Switch 1 SDL port renders through Mesa/EGL, which does not come up on the
     // Switch 2 (black screen). Render in software instead and copy to the libnx framebuffer.
-    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    // SDL's video subsystem must stay off: the software renderer only needs a surface, and the
+    // Switch SDL port has no "dummy" video driver.
+    if (SDL_Init(SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return -1;
     }
@@ -41,7 +42,9 @@ int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
     if (!g->surf) { fprintf(stderr, "surface: %s\n", SDL_GetError()); return -2; }
     g->r = SDL_CreateSoftwareRenderer(g->surf);
     if (!g->r) { fprintf(stderr, "renderer: %s\n", SDL_GetError()); return -3; }
-    if (R_FAILED(framebufferCreate(&s_fb, nwindowGetDefault(), (u32)w, (u32)h, PIXEL_FORMAT_RGBA_8888, 1)) ||
+    // Two buffers are required: with one, the display never releases it while it is shown, so the
+    // second framebufferBegin() times out and libounce aborts the app.
+    if (R_FAILED(framebufferCreate(&s_fb, nwindowGetDefault(), (u32)w, (u32)h, PIXEL_FORMAT_RGBA_8888, 2)) ||
         R_FAILED(framebufferMakeLinear(&s_fb))) {
         fprintf(stderr, "framebufferCreate failed\n");
         return -6;
@@ -96,6 +99,7 @@ void gfx_quit(Gfx *g)
 void gfx_present(Gfx *g)
 {
 #ifdef __SWITCH__
+    SDL_RenderFlush(g->r);   // draw calls are batched; finish them before reading the surface
     u32 stride;
     unsigned char *dst = framebufferBegin(&s_fb, &stride);
     if (dst) {

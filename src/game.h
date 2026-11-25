@@ -61,9 +61,13 @@ typedef struct {
     int tgroup, teasing, tact, tcopy; // target group, easing type, toggle: 1 = on, colour copy channel
     float tdx, tdy, trate, tdelay;
     int kidset;                    // index into Game.kidsets (child sprites), -1 = none
+    float spin;                    // continuous rotation (degrees per second), saw blades
+    const GdFrame *fx1, *fx2;      // portal swirl sprites
 } Obj;
 
 #define GD_GROUPS 1200
+#define GD_MAX_PART 400
+typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; } Particle;
 typedef struct { const GdChild *c; int n; const GdFrame *f[12]; } KidSet;
 #define GD_MAX_MOVES 64
 #define GD_MAX_SPAWNS 64
@@ -116,6 +120,9 @@ typedef struct {
     int noclip, sim;              // test aids: ignore deaths / running a look-ahead rollout
     const void *practice;         // GameCheckpoint to respawn at instead of the level start (or NULL)
     float ctr;                    // camera centre for restricted modes (OpenGD m_fCameraYCenter)
+    Particle pt[GD_MAX_PART]; int npt;   // visual-only particles (not part of snapshots)
+    float anim_t, emit_t;         // render time for idle animations, particle emit timer
+    int dead_fx;                  // death burst already spawned
     float ground_y, ceil_y;       // drawn floor line / ceiling (world units); ceil_y < 0 + flag below
     int has_ceil;
     int mirror;                   // mirror portal active
@@ -151,7 +158,7 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
 typedef struct {
     Player p, p2;
     int dual, mirror, input;
-    float ctr, acc, time, prev_x, prev_y, prev_rot;
+    float ctr, cam_f, acc, time, prev_x, prev_y, prev_rot;
     int lo, n;                // range of by_x indices whose flags are saved
     unsigned char *flags;     // 4 bytes per object: used, used2, tdone, off
     int cap;
