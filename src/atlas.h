@@ -23,6 +23,8 @@ typedef struct {
     GdSheet sheets[16];
     int nsheets;
     float px_per_unit;   // 1 for SD, 2 for HD, 4 for UHD
+    int *index;          // hash table of frame numbers + 1, 0 = empty
+    unsigned index_mask;
 } GdAtlas;
 
 // Loads "<resdir>/<name><suffix>.plist/.png" for each given sheet name.

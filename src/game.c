@@ -630,11 +630,11 @@ static void add_teleport_exits(GdLevel *lvl)
     }
 }
 
-int game_load(Game *gm, Gfx *g, const char *path)
+int game_load(Game *gm, Gfx *g, const char *path, const char *data)
 {
     memset(gm, 0, sizeof *gm);
     GdLevel lvl;
-    if (gd_level_load(path, &lvl)) return -1;
+    if (data ? gd_level_from_data(data, path, &lvl) : gd_level_load(path, &lvl)) return -1;
     snprintf(gm->name, sizeof gm->name, "%s", lvl.name);
     gm->path = path;
     // the original picks one look for all rod balls of a level at random
@@ -853,22 +853,9 @@ int game_load(Game *gm, Gfx *g, const char *path)
     return 0;
 }
 
-void game_set_skin(Game *gm, Gfx *g, int cube, int ship, const float c1[3], const float c2[3])
+void game_set_skin(Game *gm, const int icon[IC_COUNT], const float c1[3], const float c2[3])
 {
-    char n[64];
-    snprintf(n, sizeof n, "player_%02d_001.png", cube);   gm->fr_cube  = gfx_find(g, n);
-    snprintf(n, sizeof n, "player_%02d_2_001.png", cube); gm->fr_cube2 = gfx_find(g, n);
-    snprintf(n, sizeof n, "ship_%02d_001.png", ship);     gm->fr_ship  = gfx_find(g, n);
-    snprintf(n, sizeof n, "ship_%02d_2_001.png", ship);   gm->fr_ship2 = gfx_find(g, n);
-    snprintf(n, sizeof n, "player_ball_%02d_001.png", cube);   gm->fr_ball  = gfx_find(g, n);
-    snprintf(n, sizeof n, "player_ball_%02d_2_001.png", cube); gm->fr_ball2 = gfx_find(g, n);
-    snprintf(n, sizeof n, "bird_%02d_001.png", ship);   gm->fr_ufo  = gfx_find(g, n);
-    snprintf(n, sizeof n, "bird_%02d_2_001.png", ship); gm->fr_ufo2 = gfx_find(g, n);
-    snprintf(n, sizeof n, "bird_%02d_3_001.png", ship); gm->fr_ufo3 = gfx_find(g, n);
-    snprintf(n, sizeof n, "dart_%02d_001.png", cube);   gm->fr_dart  = gfx_find(g, n);
-    snprintf(n, sizeof n, "dart_%02d_2_001.png", cube); gm->fr_dart2 = gfx_find(g, n);
-    gm->fr_swing = gfx_find(g, "swing_01_001.png");
-    gm->fr_swing2 = gfx_find(g, "swing_01_2_001.png");
+    for (int i = 0; i < IC_COUNT; i++) gm->icon[i] = icon[i];
     for (int k = 0; k < 3; k++) { gm->c1[k] = c1[k]; gm->c2[k] = c2[k]; }
     gm->skin_set = 1;
     if (gm->ch0_valid) {
@@ -1614,7 +1601,6 @@ static void set_mode(Player *p, int mode)
         p->rot = 0;
         p->yv /= 2.0;
         p->on_ground = 0;
-        run_rotate_action(p);
     } else if (mode == M_UFO) {
         p->rot = 0;
         p->on_ground = 0;
@@ -1634,7 +1620,7 @@ static void propel(Player *p, double force)
     p->on_ground = 0;
     p->yv = flip_mod(p) * 16.0 * force * (p->mini ? 0.8 : 1.0);
     if (p->mode == M_BALL || p->mode == M_SPIDER) p->yv *= 0.6;
-    if (p->mode == M_CUBE || p->mode == M_SHIP || p->mode == M_ROBOT) run_rotate_action(p);
+    if (p->mode == M_CUBE || p->mode == M_ROBOT) run_rotate_action(p);
 }
 
 // PlayerObject::ringJump
@@ -1691,7 +1677,7 @@ static void ring_jump(Player *p, const Obj *o, int *used)
     v *= flip_mod(p);
     v *= p->mini ? 0.8 : 1.0;
     p->yv = v;
-    if (m == M_CUBE || m == M_SHIP || m == M_ROBOT) run_rotate_action(p);
+    if (m == M_CUBE || m == M_ROBOT) run_rotate_action(p);
     if (o->sub == K_BLUE) flip_gravity(p, !is_flipped(p)); // gravity ring flips after the jump
     if (m == M_BALL || m == M_SPIDER) { p->hold = 0; p->yv *= 0.7; }
     p->touch_ring = 0;
@@ -3028,6 +3014,9 @@ static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     }
 }
 
+// chosen icon of a form (the bot plays without a skin)
+static int icon_id(const Game *gm, int form) { return gm->icon[form] > 0 ? gm->icon[form] : 1; }
+
 static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, float rot, float s,
                       float scale, int swap)
 {
@@ -3037,8 +3026,6 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
     const float mini = p->mini ? 0.6f : 1.0f;
     const float k = mini * s;
     const float flip = (float)p->grav;
-    const GdFrame *cube = gm->fr_cube ? gm->fr_cube : gfx_find(g, "player_01_001.png");
-    const GdFrame *cube2 = gm->fr_cube2 ? gm->fr_cube2 : gfx_find(g, "player_01_2_001.png");
     const float up = 5.0f * scale * mini * flip; // the little cube sits 5 units above the vehicle centre
     rot += atan2f((float)gm->frame.ux, (float)gm->frame.uy) * 180.0f / 3.14159265f;   // turned gameplay
     if ((p->mode == M_ROBOT || p->mode == M_SPIDER) && gm->anim) {
@@ -3048,77 +3035,32 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
         const Anim *a = &gm->anim[which];
         if (a->nframes) {
             const int fr = (int)(gm->anim_t * (robot ? 28.0f : 20.0f)) % a->nframes;
-            const float unit = scale * mini;
-            const float r = rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
-            for (int i = 0; i < a->nparts[fr]; i++) {
-                const AnimPart *q = &a->part[fr][i];
-                const float dx = q->x, dy = q->y * flip;
-                const float x = px + (dx * c + dy * sn) * unit, y = py - (-dx * sn + dy * c) * unit;
-                const float shade = q->z < (robot ? 3 : 2) ? 0.55f : 1.0f;   // limbs on the far side
-                GdColorF m = c1, d = c2, w = {255, 255, 255, 1};
-                m.r *= shade; m.g *= shade; m.b *= shade;
-                d.r *= shade; d.g *= shade; d.b *= shade;
-                w.r *= shade; w.g *= shade; w.b *= shade;
-                const float qr = rot + q->rot * flip, qx = q->sx * k, qy = q->sy * k * flip;
-                if (q->f2) gfx_frame(g, q->f2, x, y, qr, qx, qy, d, 0);
-                gfx_frame(g, q->f, x, y, qr, qx, qy, m, 0);
-                if (q->extra) gfx_frame(g, q->extra, x, y, qr, qx, qy, w, 0);
-            }
+            anim_draw_icon(g, a, fr, !robot, icon_id(gm, robot ? IC_ROBOT : IC_SPIDER), px, py, rot,
+                           scale * mini, k, flip, c1, c2);
             return;
         }
     }
+    // the little cube that sits in the ship and the UFO
+#define DRAW(form, x, y, r, sx, sy) \
+    gfx_icon_draw(g, g_icon_types[form], icon_id(gm, form), x, y, r, sx, sy, c1, c2)
     switch (p->mode) {
-    case M_SWING: {
-        const GdFrame *a1 = gm->fr_swing ? gm->fr_swing : gm->fr_ship, *a2 = gm->fr_swing ? gm->fr_swing2 : gm->fr_ship2;
-        if (a2) gfx_frame(g, a2, px, py, rot, k, k * flip, c2, 0);
-        if (a1) gfx_frame(g, a1, px, py, rot, k, k * flip, c1, 0);
-        break;
-    }
     case M_SHIP: {
-        const GdFrame *sh = gm->fr_ship ? gm->fr_ship : gfx_find(g, "ship_01_001.png");
-        const GdFrame *sh2 = gm->fr_ship2 ? gm->fr_ship2 : gfx_find(g, "ship_01_2_001.png");
-        float ry = flip;
         // the cube follows the ship tilt: offset along the ship local "up" direction
-        float a = rot * 3.14159265f / 180.0f;
-        float ox = sinf(a) * up, oy = -cosf(a) * up;
-        if (cube) gfx_frame(g, cube, px + ox, py + oy, rot, k * 0.55f, k * 0.55f * ry, c1, 0);
-        if (cube2) gfx_frame(g, cube2, px + ox, py + oy, rot, k * 0.55f, k * 0.55f * ry, c2, 0);
-        if (sh2) gfx_frame(g, sh2, px, py, rot, k, k * ry, c2, 0);
-        if (sh) gfx_frame(g, sh, px, py, rot, k, k * ry, c1, 0);
+        const float a = rot * 3.14159265f / 180.0f;
+        DRAW(IC_CUBE, px + sinf(a) * up, py - cosf(a) * up, rot, k * 0.55f, k * 0.55f * flip);
+        DRAW(IC_SHIP, px, py, rot, k, k * flip);
         break;
     }
-    case M_UFO: {
-        float ry = flip;
-        const GdFrame *b1 = gm->fr_ufo ? gm->fr_ufo : gfx_find(g, "bird_01_001.png");
-        const GdFrame *b2 = gm->fr_ufo2 ? gm->fr_ufo2 : gfx_find(g, "bird_01_2_001.png");
-        const GdFrame *b3 = gm->fr_ufo3 ? gm->fr_ufo3 : gfx_find(g, "bird_01_3_001.png");
-        float cy = py - 4.0f * scale * mini * flip;
-        if (cube) gfx_frame(g, cube, px, cy, 0, k * 0.55f, k * 0.55f * ry, c1, 0);
-        if (cube2) gfx_frame(g, cube2, px, cy, 0, k * 0.55f, k * 0.55f * ry, c2, 0);
-        if (b3) gfx_frame(g, b3, px, py, 0, k, k * ry, (GdColorF){255, 255, 255, 1}, 0);
-        if (b2) gfx_frame(g, b2, px, py, 0, k, k * ry, c2, 0);
-        if (b1) gfx_frame(g, b1, px, py, 0, k, k * ry, c1, 0);
+    case M_UFO:
+        DRAW(IC_CUBE, px, py - 4.0f * scale * mini * flip, 0, k * 0.55f, k * 0.55f * flip);
+        DRAW(IC_UFO, px, py, 0, k, k * flip);
         break;
+    case M_SWING: DRAW(IC_SWING, px, py, rot, k, k * flip); break;
+    case M_BALL:  DRAW(IC_BALL, px, py, rot, k, k); break;
+    case M_WAVE:  DRAW(IC_WAVE, px, py, rot, k, k); break;
+    default:      DRAW(IC_CUBE, px, py, rot, k, k); break;
     }
-    case M_BALL: {
-        const GdFrame *b1 = gm->fr_ball ? gm->fr_ball : gfx_find(g, "player_ball_01_001.png");
-        const GdFrame *b2 = gm->fr_ball2 ? gm->fr_ball2 : gfx_find(g, "player_ball_01_2_001.png");
-        if (b2) gfx_frame(g, b2, px, py, rot, k, k, c2, 0);
-        if (b1) gfx_frame(g, b1, px, py, rot, k, k, c1, 0);
-        break;
-    }
-    case M_WAVE: {
-        const GdFrame *d1 = gm->fr_dart ? gm->fr_dart : gfx_find(g, "dart_01_001.png");
-        const GdFrame *d2 = gm->fr_dart2 ? gm->fr_dart2 : gfx_find(g, "dart_01_2_001.png");
-        if (d2) gfx_frame(g, d2, px, py, rot, k, k, c2, 0);
-        if (d1) gfx_frame(g, d1, px, py, rot, k, k, c1, 0);
-        break;
-    }
-    default:
-        if (cube2) gfx_frame(g, cube2, px, py, rot, k, k, c2, 0);
-        if (cube) gfx_frame(g, cube, px, py, rot, k, k, c1, 0);
-        break;
-    }
+#undef DRAW
 }
 
 // screen mapping helpers for the trail (set by game_draw)
@@ -3308,8 +3250,9 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
         const Ghost *q = &gm->ghost[i];
         if (q->age <= 0) continue;
         // the main layer of the form, in the first colour, added onto the picture
-        const GdFrame *f = q->mode == M_SHIP ? gm->fr_ship : q->mode == M_BALL ? gm->fr_ball : q->mode == M_UFO ? gm->fr_ufo
-                         : q->mode == M_WAVE ? gm->fr_dart : q->mode == M_SWING ? gm->fr_swing : gm->fr_cube;
+        const int form = q->mode == M_SHIP ? IC_SHIP : q->mode == M_BALL ? IC_BALL : q->mode == M_UFO ? IC_UFO
+                       : q->mode == M_WAVE ? IC_WAVE : q->mode == M_SWING ? IC_SWING : IC_CUBE;
+        const GdFrame *f = gfx_icon_frame(g, g_icon_types[form], icon_id(gm, form), "");
         if (!f) continue;
         const float left = 1.0f - q->age / 0.4f, k = s * (q->mini ? 0.6f : 1.0f) * (0.6f + 0.4f * left);
         GdColorF c = chan_color(gm, CH_P1, &add);

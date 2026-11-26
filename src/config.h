@@ -12,10 +12,13 @@ typedef struct {
     int joy[2];   // joystick buttons, -1 = unbound
 } Binding;
 
+// one icon per form of the player
+enum { IC_CUBE, IC_SHIP, IC_BALL, IC_UFO, IC_WAVE, IC_ROBOT, IC_SPIDER, IC_SWING, IC_COUNT };
+extern const char *const g_icon_types[IC_COUNT];   // file names in Resources/icons
+
 typedef struct {
     Binding bind[ACT_COUNT];
-    int icon_cube;    // player_NN
-    int icon_ship;    // ship_NN
+    int icon[IC_COUNT];   // numbers of the chosen icons
     int col1, col2;   // palette indices
     char name[24];    // shown under the profile button of the title screen
 } Config;

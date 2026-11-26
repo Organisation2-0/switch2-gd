@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "anim.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,6 +99,8 @@ int anim_load(Anim *a, Gfx *g, const char *file, const char *name)
                 p->extra = variant(g, tex, "_extra_001.png");
                 p->glow = variant(g, tex, "_glow_001.png");
                 p->sx = p->sy = 1.0f;
+                if (!strncmp(tex, "robot_01_", 9)) p->limb = atoi(tex + 9);
+                else if (!strncmp(tex, "spider_01_", 10)) p->limb = atoi(tex + 10);
                 if (value_of(s, stop, "position", v, sizeof v)) pair(v, &p->x, &p->y);
                 if (value_of(s, stop, "scale", v, sizeof v)) pair(v, &p->sx, &p->sy);
                 if (value_of(s, stop, "rotation", v, sizeof v)) p->rot = (float)atof(v);
@@ -122,4 +125,28 @@ int anim_load(Anim *a, Gfx *g, const char *file, const char *name)
     }
     free(text);
     return a->nframes ? 0 : -1;
+}
+
+void anim_draw_icon(Gfx *g, const Anim *a, int frame, int spider, int id, float x, float y,
+                    float rot, float unit, float k, float flip, GdColorF c1, GdColorF c2)
+{
+    if (frame < 0 || frame >= a->nframes) return;
+    const float r = rot * 3.14159265f / 180.0f, c = cosf(r), s = sinf(r);
+    const char *type = spider ? "spider" : "robot";
+    for (int i = 0; i < a->nparts[frame]; i++) {
+        const AnimPart *q = &a->part[frame][i];
+        const float dx = q->x, dy = q->y * flip;
+        const float px = x + (dx * c + dy * s) * unit, py = y - (-dx * s + dy * c) * unit;
+        const float shade = q->z < (spider ? 2 : 3) ? 0.55f : 1.0f;   // limbs on the far side
+        const GdColorF col[3] = {{c2.r * shade, c2.g * shade, c2.b * shade, c2.a},
+                                 {c1.r * shade, c1.g * shade, c1.b * shade, c1.a},
+                                 {255 * shade, 255 * shade, 255 * shade, c1.a}};
+        static const char *const layer[3] = {"_2", "", "_extra"};
+        for (int l = 0; l < 3; l++) {
+            char part[16];
+            snprintf(part, sizeof part, "_%02d%s", q->limb, layer[l]);
+            const GdFrame *f = gfx_icon_frame(g, type, id, part);
+            if (f) gfx_frame(g, f, px, py, rot + q->rot * flip, q->sx * k, q->sy * k * flip, col[l], 0);
+        }
+    }
 }

@@ -7,6 +7,7 @@
 #include "level.h"
 #include "objchild.h"
 #include "anim.h"
+#include "config.h"
 
 // animations loaded with every level
 enum { AN_BEAST1, AN_BEAST2, AN_BEAST3, AN_BEAST4, AN_BEAST5, AN_ROBOT_RUN, AN_ROBOT_JUMP, AN_ROBOT_FALL,
@@ -223,8 +224,7 @@ typedef struct {
     float acc;                    // unsimulated time (fixed 240 Hz steps)
     float prev_x, prev_y, prev_rot; // previous tick, for smooth interpolation
     // skin (set by game_set_skin)
-    const GdFrame *fr_cube, *fr_cube2, *fr_ship, *fr_ship2;
-    const GdFrame *fr_ball, *fr_ball2, *fr_ufo, *fr_ufo2, *fr_ufo3, *fr_dart, *fr_dart2, *fr_swing, *fr_swing2;
+    int icon[IC_COUNT];
     float c1[3], c2[3];
     int skin_set;
     int attempts, finished;
@@ -235,10 +235,11 @@ typedef struct {
     const char *path;
 } Game;
 
-int game_load(Game *gm, Gfx *g, const char *path);
+// data: packed level string that is already in memory (then path only names the level), or NULL.
+int game_load(Game *gm, Gfx *g, const char *path, const char *data);
 void game_free(Game *gm);
 // Chooses the icons (player_NN / ship_NN) and the two player colours (0..255).
-void game_set_skin(Game *gm, Gfx *g, int cube, int ship, const float c1[3], const float c2[3]);
+void game_set_skin(Game *gm, const int icon[IC_COUNT], const float c1[3], const float c2[3]);
 void game_reset(Game *gm);
 void game_set_hold(Game *gm, int down);
 // Advances the simulation by dt seconds (internally in 1/240 s steps).

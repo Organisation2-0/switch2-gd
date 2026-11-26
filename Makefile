@@ -45,7 +45,7 @@ DATA		:=
 INCLUDES	:=	src
 APP_TITLE	:=	Geometry Dash (fan port)
 APP_AUTHOR	:=	fan project
-APP_VERSION	:=	1.1.0
+APP_VERSION	:=	1.1.1
 
 #---------------------------------------------------------------------------------
 # options for code generation

@@ -208,6 +208,18 @@ static int parse_levelstring(char *s, GdLevel *out)
     return 0;
 }
 
+int gd_level_from_data(const char *data, const char *name, GdLevel *out)
+{
+    memset(out, 0, sizeof *out);
+    size_t n = 0;
+    char *lvlstr = gd_decode_levelstring(data, strlen(data), &n);
+    if (!lvlstr) return -2;
+    snprintf(out->name, sizeof out->name, "%s", name);
+    const int rc = parse_levelstring(lvlstr, out);
+    free(lvlstr);
+    return rc;
+}
+
 int gd_level_load(const char *path, GdLevel *out)
 {
     memset(out, 0, sizeof *out);
@@ -215,13 +227,18 @@ int gd_level_load(const char *path, GdLevel *out)
     char *raw = read_file(path, &n);
     if (!raw) return -1;
 
-    size_t dn = 0;
-    char *dec = gd_decode_levelstring(raw, n, &dn);
-    free(raw);
+    char *dec;
+    if (raw[0] == '<') {   // an export in plain XML
+        dec = raw;
+    } else {
+        size_t dn = 0;
+        dec = gd_decode_levelstring(raw, n, &dn);
+        free(raw);
+    }
     if (!dec) return -2;
 
     char *lvlstr = NULL;
-    if (strncmp(dec, "<?xml", 5) == 0) { // .gdlvl export
+    if (dec[0] == '<') { // .gdlvl export
         char *name = plist_get_string(dec, "k2");
         if (name) { snprintf(out->name, sizeof out->name, "%s", name); free(name); }
         char *k4 = plist_get_string(dec, "k4");

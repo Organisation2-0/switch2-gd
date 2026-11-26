@@ -10,7 +10,7 @@ foreach ($t in 'leveldump', 'levelpng', 'sheetpng') {
     if ($LASTEXITCODE -ne 0) { exit 1 }
     Write-Host "built build\$t.exe"
 }
-$app = $core + @("$root\src\gfx.c", "$root\src\gfx_sdl.c", "$root\src\config.c", "$root\src\imagewrite.c", "$root\src\game.c", "$root\src\bot.c", "$root\src\phystab.c", "$root\src\objchan.c", "$root\src\objchild.c", "$root\src\objz.c", "$root\src\anim.c", "$root\src\app.c")
+$app = $core + @("$root\src\gfx.c", "$root\src\gfx_sdl.c", "$root\src\config.c", "$root\src\imagewrite.c", "$root\src\game.c", "$root\src\bot.c", "$root\src\phystab.c", "$root\src\objchan.c", "$root\src\objchild.c", "$root\src\objz.c", "$root\src\anim.c", "$root\src\app.c", "$root\src\menus.c", "$root\src\saves.c")
 & $gcc -O2 -Wall -Wno-unused-function -I"$sdl\include\SDL2" -o "$root\build\gd.exe" $app -L"$sdl\lib" -lmingw32 -lSDL2main -lSDL2 -lm -static-libgcc
 if ($LASTEXITCODE -ne 0) { exit 1 }
 Copy-Item "$sdl\bin\SDL2.dll" "$root\build\" -Force

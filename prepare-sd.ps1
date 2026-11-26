@@ -3,10 +3,14 @@
 #
 #   .\prepare-sd.ps1 -Sd E:\                      # SD card root
 #   .\prepare-sd.ps1 -Sd E:\ -Levels C:\my\levels # also copy .gdlvl files
+#
+# The online levels saved in your own Geometry Dash are written to the card as level files (only
+# the levels themselves, nothing about your account); -NoSavedLevels leaves them out.
 param(
     [Parameter(Mandatory = $true)][string]$Sd,
     [string]$Steam = 'C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash',
-    [string]$Levels = ''
+    [string]$Levels = '',
+    [switch]$NoSavedLevels
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -24,7 +28,8 @@ New-Item -ItemType Directory -Force "$dres\levels", "$dest\levels" | Out-Null
 $patterns = @(
     'GJ_GameSheet-hd.*', 'GJ_GameSheet02-hd.*', 'GJ_GameSheet03-hd.*', 'GJ_GameSheet04-hd.*',
     'GJ_GameSheetGlow-hd.*', 'GJ_GameSheetIcons-hd.*', 'GJ_LaunchSheet-hd.*', 'FireSheet_01-hd.*', 'PixelSheet_01-hd.*', 'GJ_ParticleSheet-hd.*',
-    'bigFont-hd.*', 'goldFont-hd.*', 'square02_001-hd.png', 'GJ_progressBar_001-hd.png', 'smallDot-hd.png', 'slidergroove-hd.png', 'sliderthumb-hd.png', 'slidergroove2-hd.png', 'sliderBar2-hd.png', 'GJ_gradientBG-hd.png',
+    'bigFont-hd.*', 'goldFont-hd.*', 'square02_001-hd.png', 'GJ_progressBar_001-hd.png', 'smallDot-hd.png', 'slidergroove2-hd.png', 'sliderBar2-hd.png', 'GJ_gradientBG-hd.png',
+    'GJ_square05-hd.png', 'GJ_button_01-hd.png', 'GJ_button_04-hd.png', 'square02b_001-hd.png',
     'groundSquare_*_001-hd.png', 'game_bg_*_001-hd.png',
     'GJBeast0?_AnimDesc.plist', 'Robot_AnimDesc.plist', 'Spider_AnimDesc.plist'
 )
@@ -40,14 +45,25 @@ foreach ($f in Get-ChildItem "$res\levels" -Filter '*.txt') {
     $count++
 }
 
+# Player icons: one file per icon, like the original loads them.
+New-Item -ItemType Directory -Force "$dres\icons" | Out-Null
+foreach ($f in Get-ChildItem "$res\icons" -Filter '*-hd.*' -File) {
+    Copy-Item $f.FullName "$dres\icons" -Force
+    $count++
+}
+
 # Custom levels (.gdlvl) + the list file the console build reads.
-$list = @()
 if ($Levels -and (Test-Path $Levels)) {
     foreach ($f in Get-ChildItem $Levels -Filter '*.gdlvl') {
         Copy-Item $f.FullName "$dest\levels" -Force
-        $list += "sdmc:/switch/gd/levels/$($f.Name)"
     }
 }
+if (-not $NoSavedLevels) {
+    $exe = @("$root\build\gd.exe", "$root\gd.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($exe) { & $exe --export-saved "$dest\levels" }
+    else { Write-Warning "gd.exe not found: the levels saved in your game are not copied (run build-pc.ps1)." }
+}
+$list = @(Get-ChildItem "$dest\levels" -Filter '*.gdlvl' | ForEach-Object { "sdmc:/switch/gd/levels/$($_.Name)" })
 [System.IO.File]::WriteAllLines("$dest\levels\levels.txt", [string[]]$list)
 
 Copy-Item $nro (Join-Path $Sd 'switch\gd-switch2.nro') -Force

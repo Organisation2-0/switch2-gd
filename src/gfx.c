@@ -61,11 +61,22 @@ int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
         free(g->atlas.sheets[i].rgba);
         g->atlas.sheets[i].rgba = NULL;
     }
-    return 0;
+    g->icons = calloc(GFX_ICONS, sizeof *g->icons);
+    return g->icons ? 0 : -6;
+}
+
+static void icon_drop(GfxIcon *ic)
+{
+    if (ic->tex) gfxb_tex_destroy(ic->tex);
+    if (ic->ok) gd_atlas_free(&ic->atlas);
+    memset(ic, 0, sizeof *ic);
 }
 
 void gfx_quit(Gfx *g)
 {
+    for (int i = 0; g->icons && i < GFX_ICONS; i++) icon_drop(&g->icons[i]);
+    free(g->icons);
+    g->icons = NULL;
     for (int i = 0; i < g->atlas.nsheets; i++)
         if (g->sheet_tex[i]) gfxb_tex_destroy(g->sheet_tex[i]);
     gd_atlas_free(&g->atlas);
@@ -73,7 +84,7 @@ void gfx_quit(Gfx *g)
     SDL_Quit();
 }
 
-void gfx_begin_frame(Gfx *g) { (void)g; gfxb_begin_frame(); }
+void gfx_begin_frame(Gfx *g) { g->frame++; gfxb_begin_frame(); }
 
 void gfx_present(Gfx *g) { (void)g; gfxb_present(); }
 
@@ -114,6 +125,77 @@ void gfx_free_image(GfxImage *im)
 
 const GdFrame *gfx_find(Gfx *g, const char *name) { return gd_atlas_find(&g->atlas, name); }
 
+// The slot holding an icon file, loading it if needed; NULL if every slot is busy.
+static GfxIcon *icon_slot(Gfx *g, const char *file)
+{
+    int pick = -1;
+    unsigned oldest = 0;
+    for (int i = 0; i < GFX_ICONS; i++) {
+        GfxIcon *ic = &g->icons[i];
+        if (!strcmp(ic->file, file)) { ic->used = g->frame; return ic; }
+        // free slots first, then the one not drawn for the longest time (never one of this picture)
+        const unsigned age = !ic->file[0] ? ~0u : g->frame - ic->used;
+        if (age >= 2 && age > oldest) { oldest = age; pick = i; }
+    }
+    if (pick < 0) return NULL;
+    GfxIcon *ic = &g->icons[pick];
+    icon_drop(ic);
+    snprintf(ic->file, sizeof ic->file, "%s", file);
+    ic->used = g->frame;
+    char path[640];
+    snprintf(path, sizeof path, "%s/%s%s.plist", g->resdir, file, g->suffix);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return ic;
+    fclose(fp);
+    const char *const names[1] = {file};
+    if (gd_atlas_load(&ic->atlas, g->resdir, g->suffix, names, 1)) {
+        gd_atlas_free(&ic->atlas);
+        return ic;
+    }
+    GdSheet *sh = &ic->atlas.sheets[0];
+    premultiply(sh->rgba, sh->w, sh->h);
+    ic->tex = gfxb_tex_create(sh->rgba, sh->w, sh->h);
+    free(sh->rgba);
+    sh->rgba = NULL;
+    ic->ok = 1;
+    if (!ic->tex) { gd_atlas_free(&ic->atlas); ic->ok = 0; return ic; }
+    for (int i = 0; i < ic->atlas.nframes; i++) ic->atlas.frames[i].sheet = 16 + pick;
+    return ic;
+}
+
+const GdFrame *gfx_icon_frame(Gfx *g, const char *type, int id, const char *part)
+{
+    char file[40], name[64];
+    snprintf(file, sizeof file, "icons/%s_%02d", type, id);
+    snprintf(name, sizeof name, "%s_%02d%s_001.png", type, id, part);
+    const GfxIcon *ic = g->icons ? icon_slot(g, file) : NULL;
+    return ic && ic->ok ? gd_atlas_find(&ic->atlas, name) : gfx_find(g, name);
+}
+
+int gfx_icon_exists(Gfx *g, const char *type, int id)
+{
+    char path[640], name[64];
+    snprintf(path, sizeof path, "%s/icons/%s_%02d%s.plist", g->resdir, type, id, g->suffix);
+    FILE *fp = fopen(path, "rb");
+    if (fp) { fclose(fp); return 1; }
+    const int multi = !strcmp(type, "robot") || !strcmp(type, "spider");
+    snprintf(name, sizeof name, "%s_%02d%s_001.png", type, id, multi ? "_01" : "");
+    return gfx_find(g, name) != NULL;
+}
+
+void gfx_icon_draw(Gfx *g, const char *type, int id, float x, float y, float rot, float sx, float sy,
+                   GdColorF c1, GdColorF c2)
+{
+    const GdColorF white = {255, 255, 255, c1.a};
+    // back to front: the dome of the UFO, second colour, first colour, white details
+    static const char *const part[4] = {"_3", "_2", "", "_extra"};
+    const GdColorF col4[4] = {white, c2, c1, white};
+    for (int i = strcmp(type, "bird") ? 1 : 0; i < 4; i++) {
+        const GdFrame *f = gfx_icon_frame(g, type, id, part[i]);
+        if (f) gfx_frame(g, f, x, y, rot, sx, sy, col4[i], 0);
+    }
+}
+
 static void quad(Gfx *g, GfxTex *tex, const float px[4], const float py[4],
                  const float u[4], const float v[4], SDL_Color c, int additive)
 {
@@ -150,7 +232,8 @@ void gfx_frame(Gfx *g, const GdFrame *f, float cx, float cy, float rot, float sx
 {
     c.a *= g->fade;
     if (c.a <= 0.003f) return;
-    const GdSheet *sh = &g->atlas.sheets[f->sheet];
+    const GfxIcon *ic = f->sheet >= 16 ? &g->icons[f->sheet - 16] : NULL;
+    const GdSheet *sh = ic ? &ic->atlas.sheets[0] : &g->atlas.sheets[f->sheet];
     float hw = f->w * 0.5f, hh = f->h * 0.5f;
     // corners TL, TR, BR, BL in local (y-up) space
     float lx[4] = {-hw, hw, hw, -hw}, ly[4] = {hh, hh, -hh, -hh};
@@ -175,7 +258,7 @@ void gfx_frame(Gfx *g, const GdFrame *f, float cx, float cy, float rot, float sx
         u[2] = f->x / W; v[2] = (f->y + f->w) / H;
         u[3] = f->x / W; v[3] = f->y / H;
     }
-    quad(g, g->sheet_tex[f->sheet], px, py, u, v, col(c), additive);
+    quad(g, ic ? ic->tex : g->sheet_tex[f->sheet], px, py, u, v, col(c), additive);
 }
 
 void gfx_image_rect(Gfx *g, const GfxImage *im, SDL_FRect s, SDL_FRect d, GdColorF c)

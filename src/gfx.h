@@ -10,6 +10,16 @@
 typedef struct { float r, g, b, a; } GdColorF; // 0..255 for rgb, 0..1 for alpha
 typedef struct GfxTex GfxTex;                  // texture of the platform backend
 
+#define GFX_ICONS 192   // icon files kept loaded; the least recently drawn one makes room
+
+typedef struct {
+    char file[40];            // "icons/player_01", empty = free slot
+    int ok;                   // 0: the file is not there
+    unsigned used;            // frame number of the last use
+    GdAtlas atlas;
+    GfxTex *tex;
+} GfxIcon;
+
 typedef struct {
     SDL_Window *win;          // NULL on Switch 2
     int mirror;               // draw everything horizontally mirrored inside [0, mir_w]
@@ -20,6 +30,8 @@ typedef struct {
     int w, h;                // output size in pixels
     GdAtlas atlas;            // gameplay + UI frames from the shared sheets
     GfxTex *sheet_tex[16];
+    GfxIcon *icons;           // GFX_ICONS entries; their frames have sheet numbers from 16 on
+    unsigned frame;
     char resdir[512];
     const char *suffix;
 } Gfx;
@@ -77,5 +89,14 @@ void gfx_text(Gfx *g, const GfxFont *f, const char *s, float x, float y, float s
               int align, GdColorF c);
 
 const GdFrame *gfx_find(Gfx *g, const char *name);
+
+// Player icons. type: "player", "ship", "player_ball", "bird", "dart", "robot", "spider",
+// "swing"; part: "", "_2", "_3", "_extra" (robot / spider: "_01", "_01_2", ...). Each icon comes
+// from its own file in Resources/icons, like in the original; without it the shared sheet is used.
+const GdFrame *gfx_icon_frame(Gfx *g, const char *type, int id, const char *part);
+int gfx_icon_exists(Gfx *g, const char *type, int id);
+// All layers of a one-piece icon (not robot / spider), first colour c1, second colour c2.
+void gfx_icon_draw(Gfx *g, const char *type, int id, float x, float y, float rot, float sx, float sy,
+                   GdColorF c1, GdColorF c2);
 
 #endif

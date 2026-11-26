@@ -17,25 +17,8 @@
 #include <dirent.h>
 #include "../vendor/stb_image.h"
 #endif
+#include "app.h"
 #include "bot.h"
-#include "config.h"
-#include "game.h"
-#include "gfx.h"
-
-#define UI_W 1280.0f
-#define UI_H 720.0f
-#define VIEW_H 320.0f
-
-typedef enum { SC_TITLE, SC_SELECT, SC_PLAY, SC_GARAGE, SC_CONTROLS } Scene;
-
-typedef struct {
-    char path[600];
-    char name[96];
-    int diff;    // difficulty face index (0 = N/A)
-    int stars;
-    int official;
-    float best;
-} LevelEntry;
 
 static const struct { const char *name; int diff, stars; } k_official[] = {
     {"Stereo Madness", 1, 1},   {"Back On Track", 1, 2},       {"Polargeist", 2, 3},
@@ -48,48 +31,6 @@ static const struct { const char *name; int diff, stars; } k_official[] = {
     {"Dash", 5, 12},
 };
 
-static const char *const k_pad_names[16] = {"A", "B", "X", "Y", "L3", "R3", "L", "R",
-                                            "ZL", "ZR", "+", "-", "Left", "Up", "Right", "Down"};
-
-typedef struct { float x, y, w, h; } Rect;     // centre and size
-typedef struct { Rect r; int id; } Hot;        // clickable area of the screen shown last
-enum { H_NONE, H_PLAY, H_GARAGE, H_SETTINGS, H_QUIT, H_BACK, H_PREV, H_NEXT, H_CARD, H_RESUME, H_RESTART, H_MENU };
-
-typedef struct {
-    Gfx g;
-    GfxFont big, gold;
-    GfxImage gradient, dark, bar, title_bg, bg, ground, ground2, ground_menu, groove, stripes, dot, slider, thumb;
-    float lw, lh;     // drawing size (1280x720; the level tour renders 16:10)
-    Hot hot[24];
-    int nhot;
-    Scene shown;      // screen of the last picture, and when it appeared
-    float shown_since;
-    LevelEntry *levels;
-    int nlevels, sel;
-    Scene scene;
-    Game game;
-    int game_loaded;
-    int paused;
-    float t;          // seconds since start (menu animation)
-    float press;      // button press animation
-    int quit;
-    char resdir[512];
-    char custom_dir[512];
-    char cfg_path[512];
-
-    Config cfg;
-    int *cube_icons, n_cube;   // available player_NN indices
-    int *ship_icons, n_ship;
-    int garage_row;            // 0 cube, 1 ship, 2 colour 1, 3 colour 2
-    int ctl_row, ctl_col;      // controls: row = action, col 0..3 (key1,key2,pad1,pad2)
-    int capturing;             // waiting for a key / pad button to bind
-    double dbg_sum_dt, dbg_sum_ds;  // development: sum of real vs smoothed frame times
-    int dbg_frames;
-} App;
-
-static GdColorF C(float r, float g, float b, float a) { return (GdColorF){r, g, b, a}; }
-static const GdColorF WHITE = {255, 255, 255, 1};
-
 // ------------------------------------------------------------ helpers
 
 static int file_exists(const char *p)
@@ -99,19 +40,49 @@ static int file_exists(const char *p)
     return f != NULL;
 }
 
+static LevelEntry *add_level(App *a)
+{
+    LevelEntry *e = &a->levels[a->nlevels++];
+    memset(e, 0, sizeof *e);
+    e->info.length = -1;
+    return e;
+}
+
+// A level file from the levels folder; its name, creator ... come from the file if it has them.
+static void add_file(App *a, const char *path, const char *file)
+{
+    LevelEntry *e = add_level(a);
+    snprintf(e->path, sizeof e->path, "%.*s", (int)sizeof e->path - 1, path);
+    if (gd_info_file(path, &e->info)) e->info.length = -1;
+    if (e->info.name[0]) snprintf(e->name, sizeof e->name, "%s", e->info.name);
+    else {
+        snprintf(e->name, sizeof e->name, "%.90s", file);
+        char *dot = strrchr(e->name, '.');
+        if (dot) *dot = 0;
+    }
+}
+
+#define MAX_FILES 255
+
+// The official levels, then the custom ones: files in the levels folder and the online levels
+// saved in the player's own Geometry Dash.
 static void scan_levels(App *a)
 {
-    a->levels = calloc(256, sizeof(LevelEntry));
+    a->nsaved = a->save_path[0] ? gd_saved_load(a->save_path, &a->saved) : 0;
+    a->levels = calloc((size_t)(22 + MAX_FILES + a->nsaved), sizeof(LevelEntry));
     for (int i = 0; i < 22; i++) {
-        LevelEntry *e = &a->levels[a->nlevels];
-        snprintf(e->path, sizeof e->path, "%s/levels/%d.txt", a->resdir, i + 1);
-        if (!file_exists(e->path)) continue;
+        char path[600];
+        snprintf(path, sizeof path, "%s/levels/%d.txt", a->resdir, i + 1);
+        if (!file_exists(path)) continue;
+        LevelEntry *e = add_level(a);
+        snprintf(e->path, sizeof e->path, "%s", path);
         snprintf(e->name, sizeof e->name, "%s", k_official[i].name);
         e->diff = k_official[i].diff;
         e->stars = k_official[i].stars;
         e->official = 1;
-        a->nlevels++;
     }
+    a->nofficial = a->nlevels;
+    const int last = a->nofficial + MAX_FILES;
 #ifdef _WIN32
     char pat[640];
     snprintf(pat, sizeof pat, "%s\\*.gdlvl", a->custom_dir);
@@ -119,14 +90,10 @@ static void scan_levels(App *a)
     HANDLE h = FindFirstFileA(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
-            LevelEntry *e = &a->levels[a->nlevels];
-            snprintf(e->path, sizeof e->path, "%s/%s", a->custom_dir, fd.cFileName);
-            snprintf(e->name, sizeof e->name, "%.90s", fd.cFileName);
-            char *dot = strrchr(e->name, '.');
-            if (dot) *dot = 0;
-            e->diff = 0;
-            a->nlevels++;
-        } while (FindNextFileA(h, &fd) && a->nlevels < 255);
+            char path[900];
+            snprintf(path, sizeof path, "%s/%s", a->custom_dir, fd.cFileName);
+            add_file(a, path, fd.cFileName);
+        } while (FindNextFileA(h, &fd) && a->nlevels < last);
         FindClose(h);
     }
 #else
@@ -136,48 +103,31 @@ static void scan_levels(App *a)
     FILE *f = fopen(lst, "rb");
     if (f) {
         char line[600];
-        while (fgets(line, sizeof line, f) && a->nlevels < 255) {
+        while (fgets(line, sizeof line, f) && a->nlevels < last) {
             line[strcspn(line, "\r\n")] = 0;
             if (!*line) continue;
-            LevelEntry *e = &a->levels[a->nlevels++];
-            snprintf(e->path, sizeof e->path, "%s", line);
             const char *s = strrchr(line, '/');
-            snprintf(e->name, sizeof e->name, "%.90s", s ? s + 1 : line);
-            char *dot = strrchr(e->name, '.');
-            if (dot) *dot = 0;
+            add_file(a, line, s ? s + 1 : line);
         }
         fclose(f);
     }
 #endif
-}
-
-// Finds which icon numbers exist in the sprite sheets.
-static int *scan_icons(App *a, const char *fmt, int max, int *count)
-{
-    int *list = malloc(sizeof(int) * (size_t)max);
-    int n = 0;
-    char name[64];
-    for (int i = 1; i <= max; i++) {
-        snprintf(name, sizeof name, fmt, i);
-        if (gfx_find(&a->g, name)) list[n++] = i;
+    for (int i = 0; i < a->nsaved; i++) {
+        LevelEntry *e = add_level(a);
+        e->info = a->saved[i].info;
+        e->data = a->saved[i].data;
+        snprintf(e->name, sizeof e->name, "%s", e->info.name);
+        snprintf(e->path, sizeof e->path, "saved level %d", e->info.id);
     }
-    *count = n;
-    return list;
 }
 
-static int list_index(const int *list, int n, int value)
-{
-    for (int i = 0; i < n; i++) if (list[i] == value) return i;
-    return 0;
-}
-
-static void apply_skin(App *a)
+void apply_skin(App *a)
 {
     if (!a->game_loaded) return;
     float c1[3], c2[3];
     palette_color(a->cfg.col1, c1);
     palette_color(a->cfg.col2, c2);
-    game_set_skin(&a->game, &a->g, a->cfg.icon_cube, a->cfg.icon_ship, c1, c2);
+    game_set_skin(&a->game, a->cfg.icon, c1, c2);
     game_reset(&a->game);
 }
 
@@ -198,487 +148,48 @@ static void load_bg_images(App *a, const Game *gm)
     }
 }
 
-static int start_level(App *a, int idx)
+int start_level(App *a, int idx)
 {
     if (a->game_loaded) game_free(&a->game);
-    if (game_load(&a->game, &a->g, a->levels[idx].path)) { a->game_loaded = 0; return -1; }
+    if (game_load(&a->game, &a->g, a->levels[idx].path, a->levels[idx].data)) { a->game_loaded = 0; return -1; }
     a->game_loaded = 1;
     snprintf(a->game.name, sizeof a->game.name, "%s", a->levels[idx].name);
     a->game.best_percent = a->levels[idx].best;
     load_bg_images(a, &a->game);
     a->game.ground2 = &a->ground2;
     apply_skin(a);
-    a->scene = SC_PLAY;
+    a->cur = idx;
+    ui_go(a, SC_PLAY);
     a->paused = 0;
     return 0;
 }
 
-// ------------------------------------------------------------ UI primitives
-
-static int inside(Rect r, float x, float y)
+void leave_level(App *a)
 {
-    return x >= r.x - r.w / 2 && x <= r.x + r.w / 2 && y >= r.y - r.h / 2 && y <= r.y + r.h / 2;
+    if (a->game_loaded) a->levels[a->cur].best = a->game.best_percent;
+    if (a->cur < a->nofficial) {
+        a->sel = a->cur;
+        ui_go(a, SC_SELECT);
+    } else {
+        a->online_sel = a->cur - a->nofficial;
+        ui_go(a, SC_LEVEL);
+    }
 }
 
-// Draws a sprite button centred at (x,y); returns its hit rect (UI px).
-static Rect button(App *a, const char *frame, float x, float y, float scale, int hot)
+void restart(App *a)
 {
-    const GdFrame *f = gfx_find(&a->g, frame);
-    Rect r = {x, y, 0, 0};
-    if (!f) return r;
-    float s = scale * (hot ? 1.0f + 0.12f * (a->press > 0 ? 0.0f : 1.0f) - a->press * 0.15f : 1.0f);
-    gfx_frame(&a->g, f, x, y, 0, s, s, WHITE, 0);
-    r.w = f->srcw * scale;
-    r.h = f->srch * scale;
-    return r;
+    game_reset(&a->game);
+    a->game.attempts++;
+    a->paused = 0;
 }
+
+// ------------------------------------------------------------ in-level display
 
 static void text(App *a, const char *s, float x, float y, float sc, int align, GdColorF c)
 {
     // shadow for readability
     gfx_text(&a->g, &a->big, s, x + 2 * sc * 2, y + 2 * sc * 2, sc, align, C(0, 0, 0, 0.35f * c.a));
     gfx_text(&a->g, &a->big, s, x, y, sc, align, c);
-}
-
-static void panel(App *a, SDL_FRect r)
-{
-    const GdColorF c = C(0, 0, 0, 125.0f / 255.0f);
-    if (a->dark.tex) gfx_ninepatch(&a->g, &a->dark, a->dark.w / 3.0f, r, 36, c);
-    else gfx_fill(&a->g, r, c);
-}
-
-// plain background of the garage and the settings
-static void draw_menu_background(App *a)
-{
-    const GdColorF c = C(110, 110, 110, 1);
-    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(c.r * 0.6f, c.g * 0.6f, c.b * 0.6f, 1));
-    if (a->gradient.tex)
-        gfx_image_rect(&a->g, &a->gradient, (SDL_FRect){0, 0, (float)a->gradient.w, (float)a->gradient.h},
-                       (SDL_FRect){-2, -2, a->lw + 4.0f, a->lh + 4.0f}, c);
-}
-
-static GdColorF pal(int idx)
-{
-    float c[3];
-    palette_color(idx, c);
-    return C(c[0], c[1], c[2], 1);
-}
-
-// Draws a player icon (cube or ship) at the given place using the skin settings.
-static void draw_icon(App *a, int ship, int icon, float x, float y, float sc, GdColorF c1, GdColorF c2)
-{
-    char n[64], n2[64];
-    snprintf(n, sizeof n, ship ? "ship_%02d_001.png" : "player_%02d_001.png", icon);
-    snprintf(n2, sizeof n2, ship ? "ship_%02d_2_001.png" : "player_%02d_2_001.png", icon);
-    const GdFrame *f1 = gfx_find(&a->g, n), *f2 = gfx_find(&a->g, n2);
-    if (f2) gfx_frame(&a->g, f2, x, y, 0, sc, sc, c2, 0);
-    if (f1) gfx_frame(&a->g, f1, x, y, 0, sc, sc, c1, 0);
-}
-
-// ------------------------------------------------------------ scenes
-
-// ------------------------------------------------------------ the screens of the original
-//
-// Laid out in the original's coordinates: points, 320 of them from the bottom to the top of the
-// screen, positions measured in recordings of the game.
-
-static float pt_scale(const App *a) { return a->lh / 320.0f; }   // pixels per point
-static float pt_width(const App *a) { return a->lw / pt_scale(a); }
-
-static void hot_add(App *a, float x, float y, float w, float h, int id)
-{
-    const float p = pt_scale(a);
-    if (id && a->nhot < (int)(sizeof a->hot / sizeof a->hot[0]))
-        a->hot[a->nhot++] = (Hot){{x * p, (320.0f - y) * p, w * p, h * p}, id};
-}
-
-// Sprite centred at (x,y); returns its frame (NULL if the sheets do not have it).
-static const GdFrame *spr(App *a, const char *name, float x, float y, float scale, GdColorF c, int flip)
-{
-    const GdFrame *f = gfx_find(&a->g, name);
-    if (!f) return NULL;
-    const float p = pt_scale(a), s = scale * p / a->g.atlas.px_per_unit;
-    gfx_frame(&a->g, f, x * p, (320.0f - y) * p, 0, flip ? -s : s, s, c, 0);
-    return f;
-}
-
-static void spr_button(App *a, const char *name, float x, float y, float scale, int id)
-{
-    const GdFrame *f = spr(a, name, x, y, scale, WHITE, 0);
-    if (f) hot_add(a, x, y, f->srcw * scale / a->g.atlas.px_per_unit, f->srch * scale / a->g.atlas.px_per_unit, id);
-}
-
-// Empty secret coin, d points wide.
-static void spr_coin(App *a, float x, float y, float d)
-{
-    const GdFrame *c = gfx_find(&a->g, "gjCoinUI_01_off_001.png");
-    if (c) spr(a, "gjCoinUI_01_off_001.png", x, y, d * a->g.atlas.px_per_unit / c->srcw, WHITE, 0);
-}
-
-// Text centred vertically at y; align as in gfx_text; narrowed to max_w points if it is wider.
-static void label(App *a, const GfxFont *f, const char *s, float x, float y, float scale, int align, GdColorF c,
-                  float max_w)
-{
-    const float p = pt_scale(a);
-    float k = scale * p * 0.5f;   // the fonts are stored at two pixels per point
-    const float w = gfx_text_width(f, s, k);
-    if (max_w > 0 && w > max_w * p) k *= max_w * p / w;
-    gfx_text(&a->g, f, s, x * p, (320.0f - y) * p - f->line_h * k * 0.5f, k, align, c);
-}
-
-// Rounded panel (nine-slice) covering x0..x0+w, y0..y0+h.
-static void pt_panel(App *a, const GfxImage *im, float x0, float y0, float w, float h, GdColorF c)
-{
-    const float p = pt_scale(a);
-    const SDL_FRect r = {x0 * p, (320.0f - y0 - h) * p, w * p, h * p};
-    if (!im->tex) { gfx_fill(&a->g, r, c); return; }
-    const float border = im->w / 3.0f;
-    gfx_ninepatch(&a->g, im, border, r, fminf(border * 0.5f, h * 0.5f) * p, c);
-}
-
-// Progress bar with its percentage, centred at (x,y).
-static void pt_bar(App *a, float x, float y, float percent, GdColorF fill)
-{
-    const float p = pt_scale(a), w = 340.0f, h = 20.0f;
-    const float left = (x - w * 0.5f) * p, top = (320.0f - y - h * 0.5f) * p;
-    if (a->bar.tex) {
-        gfx_image_rect(&a->g, &a->bar, (SDL_FRect){0, 0, (float)a->bar.w, (float)a->bar.h},
-                       (SDL_FRect){left, top, w * p, h * p}, C(0, 0, 0, 125.0f / 255.0f));
-        const float part = fminf(fmaxf(percent / 100.0f, 0.0f), 1.0f);
-        if (part > 0)
-            gfx_image_rect(&a->g, &a->bar, (SDL_FRect){0, 0, a->bar.w * part, (float)a->bar.h},
-                           (SDL_FRect){left + 1.4f * p, top + 1.4f * p, (w - 2.8f) * part * p, (h - 2.8f) * p}, fill);
-    }
-    char s[16];
-    snprintf(s, sizeof s, "%d%%", (int)percent);
-    label(a, &a->big, s, x, y - 0.5f, 0.6f, 1, WHITE, 0);
-}
-
-// Volume slider as shown in the pause menu (there is no sound, it only shows the original's place).
-static void pt_slider(App *a, float x0, float x1, float y, float at)
-{
-    const float p = pt_scale(a), w = x1 - x0, h = w * a->slider.h / (a->slider.w ? a->slider.w : 1);
-    if (!a->slider.tex || !a->thumb.tex) return;
-    gfx_fill(&a->g, (SDL_FRect){(x0 + 2.0f) * p, (320.0f - y - h * 0.22f) * p, (w - 4.0f) * at * p, h * 0.44f * p},
-             C(60, 200, 255, 1));
-    gfx_image_rect(&a->g, &a->slider, (SDL_FRect){0, 0, (float)a->slider.w, (float)a->slider.h},
-                   (SDL_FRect){x0 * p, (320.0f - y - h * 0.5f) * p, w * p, h * p}, WHITE);
-    const float d = 18.0f;
-    gfx_image_rect(&a->g, &a->thumb, (SDL_FRect){0, 0, (float)a->thumb.w, (float)a->thumb.h},
-                   (SDL_FRect){(x0 + w * at - d * 0.5f) * p, (320.0f - y - d * 0.5f) * p, d * p, d * p}, WHITE);
-}
-
-// Scrolling ground whose surface lies at height `top`.
-static void menu_ground(App *a, float top, GdColorF c, float scroll)
-{
-    const float p = pt_scale(a), tile = 128.0f * p, y = (320.0f - top) * p;
-    if (a->ground_menu.tex) {
-        const float off = fmodf(scroll * p, tile);
-        for (float x = -off; x < a->lw; x += tile)
-            gfx_image_rect(&a->g, &a->ground_menu,
-                           (SDL_FRect){0, 0, (float)a->ground_menu.w, (float)a->ground_menu.h},
-                           (SDL_FRect){x, y, tile, tile}, c);
-    } else {
-        gfx_fill(&a->g, (SDL_FRect){0, y, a->lw, a->lh - y}, c);
-    }
-    const GdFrame *line = gfx_find(&a->g, "floorLine_01_001.png");
-    if (line)
-        gfx_frame(&a->g, line, a->lw * 0.5f, y, 0, a->lw / (float)line->w, p / a->g.atlas.px_per_unit, WHITE, 1);
-}
-
-// The colour of the title screen wanders around the colour circle.
-static GdColorF title_colour(float t)
-{
-    static const unsigned char k[12][3] = {
-        {255, 0, 255}, {255, 0, 125}, {255, 0, 0},   {255, 125, 0}, {255, 255, 0}, {125, 255, 0},
-        {0, 255, 0},   {0, 255, 125}, {0, 255, 255}, {0, 125, 255}, {0, 0, 255},   {125, 0, 255}};
-    const float at = t / 4.0f;
-    const int i = (int)at % 12, j = (i + 1) % 12;
-    const float f = at - floorf(at);
-    return C(k[i][0] + (k[j][0] - k[i][0]) * f, k[i][1] + (k[j][1] - k[i][1]) * f,
-             k[i][2] + (k[j][2] - k[i][2]) * f, 1);
-}
-
-// An icon that crosses the title screen on the ground, jumping now and then.
-static void title_runner(App *a)
-{
-    const float period = 5.0f;
-    const int n = (int)(a->t / period);
-    const float phase = a->t - n * period;
-    const float x = -60.0f + phase * 311.6f;
-    if (x > pt_width(a) + 60.0f) return;
-    const int icon = a->cube_icons[(n * 37 + 5) % a->n_cube];
-    const GdColorF c1 = pal((n * 11 + 3) % palette_size()), c2 = pal((n * 7 + 12) % palette_size());
-    // one jump of the cube lasts 0.43 s and is 65 units high
-    const float j = fmodf(phase + (n % 3) * 0.3f, 1.1f) / 0.43f;
-    const float up = j < 1.0f ? 260.0f * j * (1.0f - j) : 0.0f, rot = j < 1.0f ? 180.0f * j : 0.0f;
-    const float p = pt_scale(a), s = p / a->g.atlas.px_per_unit;
-    char n1[64], n2[64];
-    snprintf(n1, sizeof n1, "player_%02d_001.png", icon);
-    snprintf(n2, sizeof n2, "player_%02d_2_001.png", icon);
-    const GdFrame *f1 = gfx_find(&a->g, n1), *f2 = gfx_find(&a->g, n2);
-    const float px = x * p, py = (320.0f - 90.0f - 15.0f - up) * p;
-    if (f2) gfx_frame(&a->g, f2, px, py, rot, s, s, c2, 0);
-    if (f1) gfx_frame(&a->g, f1, px, py, rot, s, s, c1, 0);
-}
-
-static void draw_title(App *a)
-{
-    const float p = pt_scale(a), W = pt_width(a), mid = W * 0.5f;
-    const GdColorF c = title_colour(a->t);
-    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, c);
-    if (a->title_bg.tex) {
-        const float step = 1024.0f / 1.875f * p;
-        const float off = fmodf(a->t * 31.2f * p, step);
-        for (float x = -off; x < a->lw; x += step)
-            gfx_image_rect(&a->g, &a->title_bg, (SDL_FRect){0, 0, (float)a->title_bg.w, (float)a->title_bg.h},
-                           (SDL_FRect){x, a->lh - step, step, step}, c);
-    }
-    title_runner(a);
-    menu_ground(a, 90.0f, C(c.r * 0.72f, c.g * 0.72f, c.b * 0.72f, 1), a->t * 311.6f);
-
-    spr(a, "GJ_logo_001.png", mid, 270.0f, 1.0f, WHITE, 0);
-    spr_button(a, "GJ_closeBtn_001.png", 18.0f, 302.0f, 0.72f, H_QUIT);
-    spr_button(a, "GJ_playBtn_001.png", mid, 170.0f, 1.0f, H_PLAY);
-    spr_button(a, "GJ_garageBtn_001.png", mid - 110.0f, 170.0f, 1.0f, H_GARAGE);
-    spr_button(a, "GJ_creatorBtn_001.png", mid + 110.0f, 170.0f, 1.0f, H_NONE);
-    spr_button(a, "GJ_dailyRewardBtn_001.png", W - 40.0f, 178.0f, 1.0f, H_NONE);
-    spr_button(a, "GJ_profileButton_001.png", 45.0f, 105.0f, 1.0f, H_GARAGE);
-    if (a->cfg.name[0]) label(a, &a->gold, a->cfg.name, 47.0f, 140.0f, 0.5f, 1, WHITE, 86.0f);
-    static const struct { const char *name; float x, y, s; } social[] = {
-        {"gj_fbIcon_001.png", 22, 55, 0.8f},      {"gj_twIcon_001.png", 51, 55, 0.8f},
-        {"gj_ytIcon_001.png", 80, 55, 0.8f},      {"gj_twitchIcon_001.png", 109, 55, 0.8f},
-        {"gj_discordIcon_001.png", 109, 26, 0.8f}, {"robtoplogo_small.png", 50, 25, 0.8f}};
-    for (int i = 0; i < 6; i++) spr(a, social[i].name, social[i].x, social[i].y, social[i].s, WHITE, 0);
-    spr_button(a, "GJ_achBtn_001.png", mid - 83.5f, 45.0f, 1.0f, H_NONE);
-    spr_button(a, "GJ_optionsBtn_001.png", mid - 28.0f, 45.0f, 1.0f, H_SETTINGS);
-    spr_button(a, "GJ_statsBtn_001.png", mid + 27.5f, 45.0f, 1.0f, H_NONE);
-    spr_button(a, "GJ_ngBtn_001.png", mid + 83.0f, 45.0f, 1.0f, H_NONE);
-    spr_button(a, "GJ_newsBtn_001.png", W - 43.0f, 45.0f, 0.88f, H_NONE);
-    spr(a, "exMark_001.png", W - 28.0f, 67.0f, 0.7f, WHITE, 0);
-    label(a, &a->big, "Fan-made port - not affiliated with RobTop Games", mid, 9.0f, 0.24f, 1,
-          C(255, 255, 255, 0.75f), 0);
-}
-
-static void draw_select(App *a)
-{
-    const float W = pt_width(a), mid = W * 0.5f;
-    static const unsigned char k_page[9][3] = {{0, 0, 255},   {255, 0, 255}, {255, 0, 125}, {255, 0, 0},
-                                               {255, 125, 0}, {255, 255, 0}, {0, 255, 0},   {0, 255, 255},
-                                               {0, 125, 255}};
-    const unsigned char *pc = k_page[a->sel % 9];
-    const GdColorF c = C(pc[0], pc[1], pc[2], 1);
-    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(c.r * 0.6f, c.g * 0.6f, c.b * 0.6f, 1));
-    if (a->gradient.tex)
-        gfx_image_rect(&a->g, &a->gradient, (SDL_FRect){0, 0, (float)a->gradient.w, (float)a->gradient.h},
-                       (SDL_FRect){-2, -2, a->lw + 4.0f, a->lh + 4.0f}, c);
-    menu_ground(a, 50.0f, C(c.r * 0.55f, c.g * 0.55f, c.b * 0.55f, 1), 0);
-    spr(a, "GJ_topBar_001.png", mid, 303.0f, 1.0f, WHITE, 0);
-    spr(a, "GJ_sideArt_001.png", 35.0f, 35.0f, 1.0f, WHITE, 0);
-    spr(a, "GJ_sideArt_001.png", W - 35.0f, 35.0f, 1.0f, WHITE, 1);
-
-    const LevelEntry *e = &a->levels[a->sel];
-    pt_panel(a, &a->dark, mid - 170.0f, 172.5f, 340.0f, 95.0f, C(0, 0, 0, 125.0f / 255.0f));
-    hot_add(a, mid, 220.0f, 340.0f, 95.0f, H_CARD);
-    char name[48];
-    snprintf(name, sizeof name, "diffIcon_%02d_btn_001.png", e->diff > 0 ? e->diff : 0);
-    const float tw = fminf(gfx_text_width(&a->big, e->name, 0.9f * 0.5f), 244.0f);
-    const float left = mid - (42.0f + tw) * 0.5f - 4.0f;
-    spr(a, name, left + 13.0f, 223.0f, 1.1f, WHITE, 0);
-    label(a, &a->big, e->name, left + 41.0f, 221.5f, 0.915f, 0, WHITE, 248.0f);
-    if (e->stars > 0) {
-        char s[16];
-        snprintf(s, sizeof s, "%d", e->stars);
-        spr(a, "GJ_starsIcon_001.png", mid + 155.0f, 255.0f, 0.8f, WHITE, 0);
-        label(a, &a->big, s, mid + 143.0f, 254.0f, 0.6f, 2, C(255, 230, 40, 1), 0);
-    }
-    if (e->official)
-        for (int i = 0; i < 3; i++)
-            spr_coin(a, mid + 102.0f + i * 26.0f, 188.5f, 21.0f);
-    label(a, &a->big, "Normal Mode", mid, 149.0f, 0.5f, 1, WHITE, 0);
-    pt_bar(a, mid, 130.0f, e->best, C(0, 255, 0, 1));
-    label(a, &a->big, "Practice Mode", mid, 99.0f, 0.5f, 1, WHITE, 0);
-    pt_bar(a, mid, 80.0f, 0, C(0, 255, 255, 1));
-    label(a, &a->big, "Download the soundtrack", mid, 34.0f, 0.5f, 1, WHITE, 0);
-    const float step = a->nlevels > 1 ? fminf(16.0f, (W - 60.0f) / (a->nlevels - 1)) : 16.0f;
-    for (int i = 0; i < a->nlevels && a->dot.tex; i++) {
-        const float p = pt_scale(a), x = mid + (i - (a->nlevels - 1) * 0.5f) * step, d = 8.0f;
-        gfx_image_rect(&a->g, &a->dot, (SDL_FRect){0, 0, (float)a->dot.w, (float)a->dot.h},
-                       (SDL_FRect){(x - d * 0.5f) * p, (320.0f - 15.0f - d * 0.5f) * p, d * p, d * p},
-                       i == a->sel ? WHITE : C(125, 125, 125, 1));
-    }
-    spr(a, "sideBtn_death_001.png", W - 20.0f, 260.0f, 1.0f, WHITE, 0);
-
-    spr_button(a, "GJ_arrow_01_001.png", 25.0f, 298.0f, 1.0f, H_BACK);
-    spr(a, "GJ_infoIcon_001.png", W - 20.0f, 300.0f, 1.0f, WHITE, 0);
-    spr(a, "navArrowBtn_001.png", 25.0f, 160.0f, 1.0f, WHITE, 1);
-    spr(a, "navArrowBtn_001.png", W - 25.0f, 160.0f, 1.0f, WHITE, 0);
-    hot_add(a, 25.0f, 160.0f, 50.0f, 90.0f, H_PREV);
-    hot_add(a, W - 25.0f, 160.0f, 50.0f, 90.0f, H_NEXT);
-}
-
-static void draw_pause(App *a)
-{
-    const Game *gm = &a->game;
-    const float W = pt_width(a), mid = W * 0.5f;
-    pt_panel(a, &a->dark, 10.0f, 10.0f, W - 20.0f, 300.0f, C(0, 0, 0, 0.75f));
-    label(a, &a->big, gm->name, mid, 288.0f, 0.8f, 1, WHITE, W - 120.0f);
-    char s[64];
-    snprintf(s, sizeof s, "Best: %d%%", (int)gm->best_percent);
-    label(a, &a->gold, s, mid, 253.0f, 0.5f, 1, WHITE, 0);
-    label(a, &a->big, "Normal Mode", mid, 235.0f, 0.5f, 1, WHITE, 0);
-    pt_bar(a, mid, 215.0f, gm->percent, C(0, 255, 0, 1));
-    spr_button(a, "GJ_practiceBtn_001.png", mid - 123.0f, 130.0f, 0.92f, H_NONE);
-    spr_button(a, "GJ_playBtn2_001.png", mid - 38.0f, 130.0f, 1.0f, H_RESUME);
-    spr_button(a, "GJ_menuBtn_001.png", mid + 47.0f, 130.0f, 0.92f, H_MENU);
-    spr_button(a, "GJ_replayBtn_001.png", mid + 123.0f, 130.0f, 0.92f, H_RESTART);
-    spr(a, "gj_songIcon_001.png", mid - 191.0f, 70.0f, 0.8f, WHITE, 0);
-    pt_slider(a, mid - 173.0f, mid - 27.0f, 70.0f, 0.2f);
-    spr(a, "GJ_sfxIcon_001.png", mid + 10.0f, 70.0f, 0.8f, WHITE, 0);
-    pt_slider(a, mid + 27.0f, mid + 173.0f, 70.0f, 0.2f);
-    spr(a, "sideBtn_death_001.png", 36.0f, 284.0f, 1.0f, WHITE, 0);
-    spr(a, "sideBtn_marker_001.png", 36.0f, 250.0f, 1.0f, WHITE, 0);
-    spr(a, "sideBtn_quests_001.png", 36.0f, 216.0f, 1.0f, WHITE, 0);
-    spr_button(a, "sideBtn_options_001.png", W - 36.0f, 284.0f, 1.0f, H_NONE);
-    spr(a, "sideBtn_hide_001.png", W - 36.0f, 250.0f, 1.0f, WHITE, 0);
-    for (int i = 0; i < 3; i++)
-        spr_coin(a, mid + (i - 1) * 45.5f, 33.0f, 24.0f);
-}
-
-static void draw_complete(App *a)
-{
-    const Game *gm = &a->game;
-    const float W = pt_width(a), mid = W * 0.5f;
-    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(0, 0, 0, 100.0f / 255.0f));
-    pt_panel(a, &a->dark, mid - 190.0f, 45.0f, 380.0f, 235.0f, C(0, 0, 0, 180.0f / 255.0f));
-    spr(a, "GJ_levelComplete_001.png", mid, 250.0f, 0.8f, WHITE, 0);
-    char s[64];
-    snprintf(s, sizeof s, "Attempts: %d", gm->attempts);
-    label(a, &a->gold, s, mid, 200.0f, 0.8f, 1, WHITE, 0);
-    snprintf(s, sizeof s, "Jumps: %d", gm->jumps);
-    label(a, &a->gold, s, mid, 175.0f, 0.8f, 1, WHITE, 0);
-    const int sec = (int)gm->time;
-    snprintf(s, sizeof s, "Time: %02d:%02d", sec / 60, sec % 60);
-    label(a, &a->gold, s, mid, 150.0f, 0.8f, 1, WHITE, 0);
-    label(a, &a->big, "Awesome!", mid, 112.0f, 0.8f, 1, WHITE, 0);
-    spr_button(a, "GJ_replayBtn_001.png", mid - 95.0f, 52.0f, 1.0f, H_RESTART);
-    spr_button(a, "GJ_menuBtn_001.png", mid + 95.0f, 52.0f, 1.0f, H_MENU);
-}
-
-// ---- garage (skins) ----
-
-static const float k_garage_row_y[4] = {210, 325, 435, 520};
-#define PAL_X 690.0f
-#define PAL_Y 215.0f
-#define PAL_CELL 40.0f
-#define PAL_COLS 12
-
-static void draw_garage(App *a)
-{
-    Gfx *g = &a->g;
-    draw_menu_background(a);
-    panel(a, (SDL_FRect){100, 120, 1080, 500});
-    text(a, "Garage", UI_W / 2, 130, 0.8f, 1, WHITE);
-    button(a, "GJ_arrow_01_001.png", 56, 55, 1.15f, 0);
-
-    GdColorF c1 = pal(a->cfg.col1), c2 = pal(a->cfg.col2);
-    const GdFrame *ar = gfx_find(g, "GJ_arrow_01_001.png");
-    static const char *const labels[4] = {"Cube", "Ship", "Color 1", "Color 2"};
-    for (int r = 0; r < 4; r++) {
-        float y = k_garage_row_y[r];
-        if (r == a->garage_row) gfx_fill(g, (SDL_FRect){130, y - 50, 560, 100}, C(255, 255, 255, 0.16f));
-        text(a, labels[r], 160, y - 22, 0.4f, 0, WHITE);
-        if (r < 2) {
-            int ship = r == 1;
-            int icon = ship ? a->cfg.icon_ship : a->cfg.icon_cube;
-            int idx = list_index(ship ? a->ship_icons : a->cube_icons, ship ? a->n_ship : a->n_cube, icon);
-            int n = ship ? a->n_ship : a->n_cube;
-            if (ar) {
-                gfx_frame(g, ar, 400, y, 0, 0.7f, 0.7f, WHITE, 0);
-                gfx_frame(g, ar, 640, y, 0, -0.7f, 0.7f, WHITE, 0);
-            }
-            draw_icon(a, ship, icon, 520, y, ship ? 1.1f : 1.25f, c1, c2);
-            char s[32];
-            snprintf(s, sizeof s, "%d/%d", idx + 1, n);
-            text(a, s, 520, y + 36, 0.26f, 1, C(255, 255, 255, 0.8f));
-        } else {
-            GdColorF c = r == 2 ? c1 : c2;
-            gfx_fill(g, (SDL_FRect){440, y - 26, 160, 52}, C(255, 255, 255, 1));
-            gfx_fill(g, (SDL_FRect){443, y - 23, 154, 46}, c);
-            char s[32];
-            snprintf(s, sizeof s, "%d", (r == 2 ? a->cfg.col1 : a->cfg.col2) + 1);
-            text(a, s, 520, y + 34, 0.26f, 1, C(255, 255, 255, 0.8f));
-        }
-    }
-
-    // palette: left click = colour 1, right click = colour 2
-    int n = palette_size();
-    for (int i = 0; i < n; i++) {
-        float x = PAL_X + (i % PAL_COLS) * PAL_CELL, y = PAL_Y + (i / PAL_COLS) * PAL_CELL;
-        gfx_fill(g, (SDL_FRect){x, y, PAL_CELL - 3, PAL_CELL - 3}, pal(i));
-        if (i == a->cfg.col1) gfx_fill(g, (SDL_FRect){x, y, 10, 10}, C(0, 0, 0, 0.9f));
-        if (i == a->cfg.col2) gfx_fill(g, (SDL_FRect){x + PAL_CELL - 13, y, 10, 10}, C(255, 255, 255, 0.95f));
-    }
-    text(a, "Left click: color 1   Right click: color 2", PAL_X + 235, PAL_Y + 175, 0.22f, 1,
-         C(255, 255, 255, 0.8f));
-    // big preview
-    draw_icon(a, 0, a->cfg.icon_cube, 800, 480, 1.7f, c1, c2);
-    draw_icon(a, 1, a->cfg.icon_ship, 1010, 480, 1.5f, c1, c2);
-    text(a, "Up/Down: choose row   Left/Right: change   B: back", UI_W / 2, 598, 0.26f, 1,
-         C(255, 255, 255, 0.85f));
-}
-
-// ---- controls (key bindings) ----
-
-static const float k_ctl_x[4] = {620, 780, 940, 1100};
-#define CTL_Y0 215.0f
-#define CTL_ROW 58.0f
-
-static void binding_label(const Config *c, int act, int col, char *out, size_t n)
-{
-    if (col < 2) {
-        int k = c->bind[act].key[col];
-        if (!k) { snprintf(out, n, "-"); return; }
-        snprintf(out, n, "%.14s", SDL_GetKeyName(k));
-    } else {
-        int b = c->bind[act].joy[col - 2];
-        if (b < 0) snprintf(out, n, "-");
-        else if (b < 16) snprintf(out, n, "%s", k_pad_names[b]);
-        else snprintf(out, n, "Btn %d", b);
-    }
-}
-
-static void draw_controls(App *a)
-{
-    Gfx *g = &a->g;
-    draw_menu_background(a);
-    panel(a, (SDL_FRect){100, 110, 1080, 520});
-    text(a, "Controls", UI_W / 2, 118, 0.8f, 1, WHITE);
-    button(a, "GJ_arrow_01_001.png", 56, 55, 1.15f, 0);
-
-    static const char *const heads[4] = {"Key 1", "Key 2", "Pad 1", "Pad 2"};
-    for (int c = 0; c < 4; c++) text(a, heads[c], k_ctl_x[c], 172, 0.28f, 1, C(255, 255, 255, 0.8f));
-    for (int r = 0; r < ACT_COUNT; r++) {
-        float y = CTL_Y0 + r * CTL_ROW;
-        text(a, g_action_names[r], 160, y - 12, 0.38f, 0, WHITE);
-        for (int c = 0; c < 4; c++) {
-            int selc = (r == a->ctl_row && c == a->ctl_col);
-            float w = 140, h = 44;
-            gfx_fill(g, (SDL_FRect){k_ctl_x[c] - w / 2 - 2, y - h / 2 - 2 + 8, w + 4, h + 4},
-                     selc ? C(255, 255, 80, 1) : C(0, 0, 0, 0.4f));
-            gfx_fill(g, (SDL_FRect){k_ctl_x[c] - w / 2, y - h / 2 + 8, w, h},
-                     selc ? C(40, 90, 200, 1) : C(0, 0, 0, 0.55f));
-            char s[40];
-            if (selc && a->capturing) snprintf(s, sizeof s, "...");
-            else binding_label(&a->cfg, r, c, s, sizeof s);
-            float sc = 0.3f;
-            if (gfx_text_width(&a->big, s, sc) > w - 12) sc *= (w - 12) / gfx_text_width(&a->big, s, sc);
-            text(a, s, k_ctl_x[c], y - 2, sc, 1, WHITE);
-        }
-    }
-    text(a, a->capturing ? "Press a key or pad button (Esc: cancel)"
-                         : "Enter/A: rebind   Del/X: clear   R/Y: reset all   B/Esc: back",
-         UI_W / 2, 600, 0.26f, 1, C(255, 255, 255, 0.9f));
 }
 
 static char g_bot_hud[256];
@@ -712,6 +223,7 @@ static void draw_hud(App *a)
 
 static void draw_play(App *a)
 {
+    a->nhot = 0;
     Game *gm = &a->game;
     Gfx *g = &a->g;
     float scale = a->lh / VIEW_H;
@@ -727,291 +239,13 @@ static void draw_play(App *a)
     }
     draw_hud(a);
 #ifdef __SWITCH__
-    button(a, "GJ_pauseBtn_001.png", UI_W - 50, 50, 0.7f, 0);   // the original shows it on touch devices
+    const GdFrame *pause = gfx_find(g, "GJ_pauseBtn_001.png");   // the original shows it on touch devices
+    if (pause) gfx_frame(g, pause, UI_W - 50, 50, 0, 0.7f, 0.7f, WHITE, 0);
 #endif
     if (g_bot_hud[0]) text(a, g_bot_hud, 20, 672, 0.32f, 0, C(255, 255, 255, 0.9f));
 
-    if (gm->finished) draw_complete(a);
-    else if (a->paused) draw_pause(a);
-}
-
-// ------------------------------------------------------------ input
-
-static void save_config(App *a) { config_save(&a->cfg, a->cfg_path); }
-
-static void press_play(App *a)
-{
-    if (a->nlevels > 0 && start_level(a, a->sel) != 0) fprintf(stderr, "level load failed\n");
-}
-
-static void leave_level(App *a)
-{
-    if (a->game_loaded) a->levels[a->sel].best = a->game.best_percent;
-    a->scene = SC_SELECT;
-}
-
-static void restart(App *a)
-{
-    game_reset(&a->game);
-    a->game.attempts++;
-    a->paused = 0;
-}
-
-static void garage_step(App *a, int dir)
-{
-    Config *c = &a->cfg;
-    switch (a->garage_row) {
-    case 0: {
-        int i = list_index(a->cube_icons, a->n_cube, c->icon_cube) + dir;
-        i = (i + a->n_cube) % a->n_cube;
-        c->icon_cube = a->cube_icons[i];
-        break;
-    }
-    case 1: {
-        int i = list_index(a->ship_icons, a->n_ship, c->icon_ship) + dir;
-        i = (i + a->n_ship) % a->n_ship;
-        c->icon_ship = a->ship_icons[i];
-        break;
-    }
-    case 2: c->col1 = (c->col1 + dir + palette_size()) % palette_size(); break;
-    case 3: c->col2 = (c->col2 + dir + palette_size()) % palette_size(); break;
-    }
-}
-
-static void on_confirm(App *a)
-{
-    switch (a->scene) {
-    case SC_TITLE: a->scene = SC_SELECT; break;
-    case SC_SELECT: press_play(a); break;
-    case SC_PLAY:
-        if (a->game.finished) restart(a);
-        else if (a->paused) a->paused = 0;
-        break;
-    case SC_CONTROLS: a->capturing = 1; break;
-    case SC_GARAGE: break;
-    }
-}
-
-static void on_back(App *a)
-{
-    switch (a->scene) {
-    case SC_TITLE: a->quit = 1; break;
-    case SC_SELECT: a->scene = SC_TITLE; break;
-    case SC_GARAGE:
-    case SC_CONTROLS:
-        save_config(a);
-        a->scene = SC_TITLE;
-        break;
-    case SC_PLAY:
-        if (a->game.finished) leave_level(a);
-        else if (a->paused) leave_level(a);
-        else a->paused = 1;
-        break;
-    }
-}
-
-static void do_left_right(App *a, int dir)
-{
-    switch (a->scene) {
-    case SC_SELECT:
-        if (a->nlevels > 0) a->sel = (a->sel + dir + a->nlevels) % a->nlevels;   // the list wraps around
-        break;
-    case SC_GARAGE: garage_step(a, dir); break;
-    case SC_CONTROLS: a->ctl_col = (a->ctl_col + dir + 4) % 4; break;
-    default: break;
-    }
-}
-
-static void do_up_down(App *a, int dir)
-{
-    if (a->scene == SC_GARAGE) a->garage_row = (a->garage_row + dir + 4) % 4;
-    else if (a->scene == SC_CONTROLS) a->ctl_row = (a->ctl_row + dir + ACT_COUNT) % ACT_COUNT;
-}
-
-static void action_down(App *a, int act)
-{
-    int playing = a->scene == SC_PLAY && !a->paused && !a->game.finished;
-    switch (act) {
-    case ACT_JUMP:
-        if (playing) game_set_hold(&a->game, 1);
-        else on_confirm(a);
-        break;
-    case ACT_PAUSE:
-        if (a->scene == SC_PLAY && !a->game.finished) a->paused = !a->paused;
-        break;
-    case ACT_RESTART:
-        if (a->scene == SC_PLAY) restart(a);
-        else if (a->scene == SC_CONTROLS) { config_reset_bindings(&a->cfg); save_config(a); }
-        break;
-    case ACT_BACK: on_back(a); break;
-    case ACT_CONFIRM: on_confirm(a); break;
-    case ACT_LEFT: do_left_right(a, -1); break;
-    case ACT_RIGHT: do_left_right(a, 1); break;
-    default: break;
-    }
-}
-
-static void action_up(App *a, int act)
-{
-    if (act == ACT_JUMP && a->scene == SC_PLAY) game_set_hold(&a->game, 0);
-}
-
-static void to_ui(App *a, int px, int py, float *ux, float *uy)
-{
-    int w, h;
-    SDL_GetWindowSize(a->g.win, &w, &h);
-    *ux = px * UI_W / (float)w;
-    *uy = py * a->lh / (float)h;
-}
-
-static void do_left_right(App *a, int dir);
-
-static void on_click(App *a, float x, float y, int right)
-{
-    int hit = H_NONE;
-    for (int i = a->nhot - 1; i >= 0 && !hit; i--)
-        if (inside(a->hot[i].r, x, y)) hit = a->hot[i].id;
-    switch (a->scene) {
-    case SC_TITLE:
-        if (hit == H_PLAY) a->scene = SC_SELECT;
-        else if (hit == H_GARAGE) a->scene = SC_GARAGE;
-        else if (hit == H_SETTINGS) a->scene = SC_CONTROLS;
-        else if (hit == H_QUIT) a->quit = 1;
-        break;
-    case SC_SELECT:
-        if (hit == H_BACK) a->scene = SC_TITLE;
-        else if (hit == H_PREV) do_left_right(a, -1);
-        else if (hit == H_NEXT) do_left_right(a, 1);
-        else if (hit == H_CARD) press_play(a);
-        break;
-    case SC_GARAGE: {
-        if (x < 200 && y < 130) { on_back(a); break; }
-        for (int r = 0; r < 4; r++)
-            if (fabsf(y - k_garage_row_y[r]) < 50 && x < 700) {
-                a->garage_row = r;
-                if (r < 2) {
-                    if (fabsf(x - 400) < 50) garage_step(a, -1);
-                    else if (fabsf(x - 640) < 50) garage_step(a, 1);
-                }
-            }
-        for (int i = 0; i < palette_size(); i++) {
-            float px = PAL_X + (i % PAL_COLS) * PAL_CELL, py = PAL_Y + (i / PAL_COLS) * PAL_CELL;
-            if (x >= px && x < px + PAL_CELL && y >= py && y < py + PAL_CELL) {
-                if (right) a->cfg.col2 = i; else a->cfg.col1 = i;
-            }
-        }
-        break;
-    }
-    case SC_CONTROLS: {
-        if (x < 200 && y < 130) { on_back(a); break; }
-        for (int r = 0; r < ACT_COUNT; r++)
-            for (int c = 0; c < 4; c++)
-                if (fabsf(x - k_ctl_x[c]) < 70 && fabsf(y - (CTL_Y0 + r * CTL_ROW + 8)) < 26) {
-                    a->ctl_row = r; a->ctl_col = c; a->capturing = 1;
-                }
-        break;
-    }
-    case SC_PLAY:
-        if (a->game.finished || a->paused) {
-            if (hit == H_RESTART) restart(a);
-            else if (hit == H_MENU) leave_level(a);
-            else if (hit == H_RESUME) a->paused = 0;
-        }
-#ifdef __SWITCH__
-        else if (x > UI_W - 100 && y < 100) a->paused = 1;
-#endif
-        else {
-            game_set_hold(&a->game, 1);
-        }
-        break;
-    }
-}
-
-// Stores a captured key / pad button into the selected binding.
-static void bind_capture(App *a, int is_joy, int code)
-{
-    Binding *b = &a->cfg.bind[a->ctl_row];
-    int col = a->ctl_col;
-    if (is_joy) { if (col >= 2) b->joy[col - 2] = code; else b->joy[0] = code; }
-    else { if (col < 2) b->key[col] = code; else b->key[0] = code; }
-    a->capturing = 0;
-    save_config(a);
-}
-
-static void handle_event(App *a, const SDL_Event *e)
-{
-    switch (e->type) {
-    case SDL_QUIT: a->quit = 1; break;
-    case SDL_KEYDOWN: {
-        if (e->key.repeat) break;
-        int sym = e->key.keysym.sym;
-        if (a->capturing) {
-            if (sym == SDLK_ESCAPE) a->capturing = 0;
-            else bind_capture(a, 0, sym);
-            break;
-        }
-        // non-rebindable shortcuts
-        if (a->scene == SC_TITLE && sym == SDLK_g) { a->scene = SC_GARAGE; break; }
-        if (a->scene == SC_TITLE && sym == SDLK_o) { a->scene = SC_CONTROLS; break; }
-        if (a->scene == SC_GARAGE || a->scene == SC_CONTROLS) {
-            if (sym == SDLK_UP) { do_up_down(a, -1); break; }
-            if (sym == SDLK_DOWN) { do_up_down(a, 1); break; }
-        }
-        if (a->scene == SC_CONTROLS && sym == SDLK_DELETE) {
-            Binding *b = &a->cfg.bind[a->ctl_row];
-            if (a->ctl_col < 2) b->key[a->ctl_col] = 0; else b->joy[a->ctl_col - 2] = -1;
-            save_config(a);
-            break;
-        }
-        int act = config_action_for_key(&a->cfg, sym);
-        // in the menus the cursor keys always navigate, even if rebound elsewhere
-        if (act < 0 && (sym == SDLK_LEFT)) act = ACT_LEFT;
-        if (act < 0 && (sym == SDLK_RIGHT)) act = ACT_RIGHT;
-        if (act < 0 && sym == SDLK_ESCAPE) act = ACT_BACK;
-        if (act >= 0) action_down(a, act);
-        break;
-    }
-    case SDL_KEYUP: {
-        int act = config_action_for_key(&a->cfg, e->key.keysym.sym);
-        if (act >= 0) action_up(a, act);
-        break;
-    }
-    case SDL_MOUSEBUTTONDOWN: {
-        float x, y;
-        to_ui(a, e->button.x, e->button.y, &x, &y);
-        on_click(a, x, y, e->button.button == SDL_BUTTON_RIGHT);
-        break;
-    }
-    case SDL_MOUSEBUTTONUP:
-        if (a->scene == SC_PLAY) game_set_hold(&a->game, 0);
-        break;
-    case SDL_JOYBUTTONDOWN: {
-        int b = e->jbutton.button;
-        if (a->capturing) { bind_capture(a, 1, b); break; }
-        if (a->scene == SC_TITLE && b == 2) { a->scene = SC_GARAGE; break; }
-        if (a->scene == SC_TITLE && b == 3) { a->scene = SC_CONTROLS; break; }
-        if (a->scene == SC_CONTROLS && b == 3) { config_reset_bindings(&a->cfg); save_config(a); break; }
-        if (a->scene == SC_CONTROLS && b == 2) {
-            Binding *bd = &a->cfg.bind[a->ctl_row];
-            if (a->ctl_col < 2) bd->key[a->ctl_col] = 0; else bd->joy[a->ctl_col - 2] = -1;
-            save_config(a);
-            break;
-        }
-        if ((a->scene == SC_GARAGE || a->scene == SC_CONTROLS) && (b == 13 || b == 15)) {
-            do_up_down(a, b == 13 ? -1 : 1);
-            break;
-        }
-        int act = config_action_for_joy(&a->cfg, b);
-        if (act >= 0) action_down(a, act);
-        break;
-    }
-    case SDL_JOYBUTTONUP: {
-        int act = config_action_for_joy(&a->cfg, e->jbutton.button);
-        if (act >= 0) action_up(a, act);
-        break;
-    }
-    default: break;
-    }
+    if (gm->finished) ui_draw_complete(a);
+    else if (a->paused) ui_draw_pause(a);
 }
 
 // ------------------------------------------------------------ bot run (development aid)
@@ -1254,12 +488,12 @@ static void render(App *a)
 {
     gfx_begin_frame(&a->g);
     a->nhot = 0;
-    switch (a->scene) {
-    case SC_TITLE: draw_title(a); break;
-    case SC_SELECT: draw_select(a); break;
-    case SC_PLAY: draw_play(a); break;
-    case SC_GARAGE: draw_garage(a); break;
-    case SC_CONTROLS: draw_controls(a); break;
+    if (a->scene == SC_PLAY) draw_play(a);
+    else ui_draw(a);
+    // a finished level offers its buttons as soon as it ends
+    if (a->scene == SC_PLAY && a->game.finished && a->focus_id != H_RESTART && a->focus_id != H_MENU) {
+        a->focus_id = H_RESTART;
+        a->focus_arg = 0;
     }
     if (a->scene != a->shown) {
         a->shown = a->scene;
@@ -1351,7 +585,7 @@ static int tour(App *a, int idx, const char *marks, const char *dir, float extra
     const float len = gm->end_x - 380.0f + extra_len;   // progress bar of the original -> position
     const float scale = (float)a->g.h / VIEW_H, vw = (float)a->g.w / scale;
     static const float tc1[3] = {0, 255, 255}, tc2[3] = {0, 0, 255};   // colours used in the recordings
-    game_set_skin(gm, &a->g, a->cfg.icon_cube, a->cfg.icon_ship, tc1, tc2);
+    game_set_skin(gm, a->cfg.icon, tc1, tc2);
     game_reset(gm);
     for (const char *s = marks; s && *s; ) {
         const int mark = atoi(s);
@@ -1438,6 +672,12 @@ int main(int argc, char **argv)
     const char *tour_marks = NULL, *tour_dir = ".";
     int tall = 0;     // 16:10 screenshots, to compare with recordings of the original
     float tour_len = 0.0f;
+    int shot_tab = 0, shot_page = -1, shot_online = 0, shot_focus = 0;
+    const char *export_dir = NULL;
+#ifdef _WIN32
+    const char *local = getenv("LOCALAPPDATA");   // where the game keeps its save file
+    if (local) snprintf(a->save_path, sizeof a->save_path, "%s/GeometryDash/CCGameManager.dat", local);
+#endif
     snprintf(a->resdir, sizeof a->resdir, "%s",
 #ifdef __SWITCH__
              "sdmc:/switch/gd/Resources");
@@ -1479,6 +719,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dual")) shot_dual = 1;
         else if (!strcmp(argv[i], "--tour") && i + 1 < argc) tour_marks = argv[++i];
         else if (!strcmp(argv[i], "--tall")) tall = 1;
+        else if (!strcmp(argv[i], "--save") && i + 1 < argc) {   // save file of the game, or "none"
+            const char *v = argv[++i];
+            snprintf(a->save_path, sizeof a->save_path, "%s", strcmp(v, "none") ? v : "");
+        }
+        else if (!strcmp(argv[i], "--export-saved") && i + 1 < argc) export_dir = argv[++i];
+        else if (!strcmp(argv[i], "--tab") && i + 1 < argc) shot_tab = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--page") && i + 1 < argc) shot_page = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--online") && i + 1 < argc) shot_online = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--focus")) shot_focus = 1;
         else if (!strcmp(argv[i], "--tourdir") && i + 1 < argc) tour_dir = argv[++i];
         else if (!strcmp(argv[i], "--tourlen") && i + 1 < argc) tour_len = (float)atof(argv[++i]);
     }
@@ -1488,6 +737,14 @@ int main(int argc, char **argv)
     setvbuf(stderr, NULL, _IONBF, 0);
     fprintf(stderr, "gd-switch2 start, res=%s\n", a->resdir);
 #endif
+    if (export_dir) {   // writes the saved online levels as files, for the console
+        GdSavedLevel *list = NULL;
+        const int n = gd_saved_load(a->save_path, &list);
+        const int written = gd_saved_export(list, n, export_dir);
+        printf("exported %d of %d saved levels\n", written, n);
+        gd_saved_free(list, n);
+        return written == n ? 0 : 1;
+    }
     // the tour renders in 16:10 like the recordings of the original game
     a->lw = UI_W;
     a->lh = tour_marks || tall ? 800.0f : UI_H;
@@ -1520,24 +777,9 @@ int main(int argc, char **argv)
         return 1;
     }
     fprintf(stderr, "gfx ok (%dx%d), %d sheets\n", a->g.w, a->g.h, a->g.atlas.nsheets);
-    gfx_font_load(&a->g, "bigFont", &a->big);
-    gfx_load_image(&a->g, "GJ_gradientBG-hd.png", &a->gradient);
-    gfx_font_load(&a->g, "goldFont", &a->gold);
-    gfx_load_image(&a->g, "square02_001-hd.png", &a->dark);
-    gfx_load_image(&a->g, "GJ_progressBar_001-hd.png", &a->bar);
-    gfx_load_image(&a->g, "game_bg_01_001-hd.png", &a->title_bg);
-    gfx_load_image(&a->g, "smallDot-hd.png", &a->dot);
-    gfx_load_image(&a->g, "slidergroove-hd.png", &a->slider);
-    gfx_load_image(&a->g, "sliderthumb-hd.png", &a->thumb);
-    gfx_load_image(&a->g, "groundSquare_01_001-hd.png", &a->ground_menu);
-    gfx_load_image(&a->g, "slidergroove2-hd.png", &a->groove);
-    gfx_load_image(&a->g, "sliderBar2-hd.png", &a->stripes);
+    ui_load(a);
     scan_levels(a);
     config_load(&a->cfg, a->cfg_path);
-    a->cube_icons = scan_icons(a, "player_%02d_001.png", 400, &a->n_cube);
-    a->ship_icons = scan_icons(a, "ship_%02d_001.png", 200, &a->n_ship);
-    if (!a->n_cube) { a->cube_icons[0] = 1; a->n_cube = 1; }
-    if (!a->n_ship) { a->ship_icons[0] = 1; a->n_ship = 1; }
 #ifdef __SWITCH__
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
@@ -1560,8 +802,15 @@ int main(int argc, char **argv)
     if (shot || bench_frames) {
         a->sel = level;
         if (!strcmp(scene, "select")) a->scene = SC_SELECT;
-        else if (!strcmp(scene, "garage")) { a->scene = SC_GARAGE; a->garage_row = 2; }
-        else if (!strcmp(scene, "controls")) a->scene = SC_CONTROLS;
+        else if (!strcmp(scene, "garage") || !strcmp(scene, "colors")) {
+            ui_open_garage(a, shot_tab, !strcmp(scene, "colors"));
+            if (shot_page >= 0) a->page = shot_page;
+        }
+        else if (!strcmp(scene, "controls")) ui_go(a, SC_CONTROLS);
+        else if (!strcmp(scene, "online") || !strcmp(scene, "level")) {
+            ui_go(a, !strcmp(scene, "level") ? SC_LEVEL : SC_ONLINE);
+            a->online_sel = shot_online;
+        }
         else if (!strcmp(scene, "play") || !strcmp(scene, "complete") || !strcmp(scene, "pause")) {
             if (start_level(a, level) != 0) { fprintf(stderr, "cannot start level\n"); return 1; }
             if (mode >= 0) a->game.p.mode = mode;
@@ -1580,13 +829,15 @@ int main(int argc, char **argv)
                 a->game.percent = tp_x / (a->game.end_x - 380) * 100.0f;
             }
             if (!strcmp(scene, "complete")) a->game.finished = 1;
-            if (!strcmp(scene, "pause")) a->paused = 1;
+            if (!strcmp(scene, "pause")) { a->paused = 1; a->focus_id = H_RESUME; }
+            level = a->cur;
         }
         if (bench_frames) {
             bench(a, bench_frames);
             gfx_quit(&a->g);
             return 0;
         }
+        a->show_focus = shot_focus;
         for (int i = 0; i < 4; i++) { a->t += 0.5f; render(a); }
         int rc = save_shot(a, shot);
         gfx_quit(&a->g);
@@ -1634,10 +885,10 @@ int main(int argc, char **argv)
             memset(&je, 0, sizeof je);
             je.type = (pdown & pad_map[b]) ? SDL_JOYBUTTONDOWN : SDL_JOYBUTTONUP;
             je.jbutton.button = (Uint8)b;
-            handle_event(a, &je);
+            ui_event(a, &je);
         }
 #endif
-        while (SDL_PollEvent(&e)) handle_event(a, &e);
+        while (SDL_PollEvent(&e)) ui_event(a, &e);
         Uint64 now = SDL_GetPerformanceCounter();
         float dt = (float)((double)(now - last) / (double)SDL_GetPerformanceFrequency());
         last = now;
@@ -1649,7 +900,7 @@ int main(int argc, char **argv)
         a->t += dt_smooth;
         a->dbg_sum_dt += dt;
         a->dbg_sum_ds += dt_smooth;
-        a->dbg_frames++;        if (a->press > 0) a->press = fmaxf(0, a->press - dt_smooth * 4);
+        a->dbg_frames++;
         if (bot_spec) {
             if (bot_pos < 0 || bot_next) {
                 bot_next = 0;
@@ -1695,7 +946,7 @@ int main(int argc, char **argv)
             break;
         }
     }
-    save_config(a);
+    config_save(&a->cfg, a->cfg_path);
     if (a->game_loaded) game_free(&a->game);
     gfx_quit(&a->g);
     return 0;

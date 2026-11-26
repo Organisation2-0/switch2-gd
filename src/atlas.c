@@ -69,6 +69,8 @@ static int parse_nums(const char *s, float *out, int n)
     return k;
 }
 
+static void build_index(GdAtlas *a);
+
 static int parse_plist(GdAtlas *a, const char *xml, int sheet)
 {
     const char *p = strstr(xml, "<key>frames</key>");
@@ -168,11 +170,41 @@ int gd_atlas_load(GdAtlas *a, const char *resdir, const char *suffix,
         a->nsheets = i + 1;
         (void)first;
     }
+    build_index(a);
     return 0;
+}
+
+static unsigned name_hash(const char *s)
+{
+    unsigned h = 2166136261u;   // FNV-1a
+    while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
+// Built once all sheets are loaded. Of equal names the first frame wins.
+static void build_index(GdAtlas *a)
+{
+    unsigned size = 64;
+    while (size < (unsigned)a->nframes * 2u) size *= 2;
+    free(a->index);
+    a->index = calloc(size, sizeof *a->index);
+    if (!a->index) return;
+    a->index_mask = size - 1;
+    for (int i = 0; i < a->nframes; i++) {
+        unsigned at = name_hash(a->frames[i].name) & a->index_mask;
+        while (a->index[at] && strcmp(a->frames[a->index[at] - 1].name, a->frames[i].name))
+            at = (at + 1) & a->index_mask;
+        if (!a->index[at]) a->index[at] = i + 1;
+    }
 }
 
 const GdFrame *gd_atlas_find(const GdAtlas *a, const char *name)
 {
+    if (a->index) {
+        for (unsigned at = name_hash(name) & a->index_mask; a->index[at]; at = (at + 1) & a->index_mask)
+            if (!strcmp(a->frames[a->index[at] - 1].name, name)) return &a->frames[a->index[at] - 1];
+        return NULL;
+    }
     for (int i = 0; i < a->nframes; i++)
         if (!strcmp(a->frames[i].name, name)) return &a->frames[i];
     return NULL;
@@ -182,5 +214,6 @@ void gd_atlas_free(GdAtlas *a)
 {
     for (int i = 0; i < a->nsheets; i++) if (a->sheets[i].rgba) stbi_image_free(a->sheets[i].rgba);
     free(a->frames);
+    free(a->index);
     memset(a, 0, sizeof *a);
 }

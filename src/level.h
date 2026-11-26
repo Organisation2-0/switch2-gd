@@ -48,6 +48,8 @@ char *gd_decode_levelstring(const char *src, size_t len, size_t *out_len);
 //  - .gdlvl exports: gzip+base64 XML plist whose key k4 holds the level string
 // Returns 0 on success.
 int gd_level_load(const char *path, GdLevel *out);
+// The same for a packed level string in memory.
+int gd_level_from_data(const char *data, const char *name, GdLevel *out);
 
 void gd_level_free(GdLevel *lvl);
 
