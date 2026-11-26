@@ -117,6 +117,17 @@ static char *plist_get_string(const char *xml, const char *key)
     return r;
 }
 
+// "hue a saturation a value a sAdd a vAdd"
+static void parse_hsv_string(const char *s, float out[5])
+{
+    out[0] = 0; out[1] = 1; out[2] = 1; out[3] = 0; out[4] = 0;
+    for (int n = 0; *s && n < 5; n++) {
+        out[n] = (float)atof(s);
+        while (*s && *s != 'a') s++;
+        if (*s == 'a') s++;
+    }
+}
+
 static void parse_object(char *rec, GdObject *o)
 {
     memset(o, 0, sizeof *o);
@@ -132,6 +143,13 @@ static void parse_object(char *rec, GdObject *o)
         }
         have_key = 0;
         float v = (float)atof(tok);
+        if (key == 152 || key == 435) {   // 2.2 lists: "group.weight.group.weight..."
+            for (const char *g = tok; *g && o->nlist < 16;) {
+                o->list[o->nlist++] = (short)atoi(g);
+                while (*g && *g != '.') g++;
+                if (*g == '.') g++;
+            }
+        }
         if (key == 57) {
             const char *g = tok;
             while (*g && o->ngroups < GD_MAX_GROUPS) {
@@ -148,6 +166,12 @@ static void parse_object(char *rec, GdObject *o)
         case 5: o->flipy = (int)v; break;
         case 6: o->rot = v; break;
         case 32: o->scale = v; break;
+        case 128: o->scale_x = v; break;
+        case 129: o->scale_y = v; break;
+        case 41: o->has_hsv1 = v != 0; break;
+        case 42: o->has_hsv2 = v != 0; break;
+        case 43: parse_hsv_string(tok, o->hsv1); break;
+        case 44: parse_hsv_string(tok, o->hsv2); break;
         default: break;
         }
         if (o->nprops < GD_MAX_PROPS) {

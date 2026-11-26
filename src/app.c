@@ -815,7 +815,8 @@ typedef struct {
     char label[128];
 } BotRun;
 
-static const char *const k_mode_names[7] = {"cube", "ship", "ball", "ufo", "wave", "robot", "spider"};
+#define MODE_COUNT 8
+static const char *const k_mode_names[MODE_COUNT] = {"cube", "ship", "ball", "ufo", "wave", "robot", "spider", "swing"};
 
 static void botrun_end(App *a, BotRun *r)
 {
@@ -834,7 +835,7 @@ static void botrun_begin(BotRun *r)
 static void botrun_summary(App *a, BotRun *r, int idx, const char *why)
 {
     char m[128] = "";
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < MODE_COUNT; i++)
         if (r->modes & (1u << i)) { strcat(m, m[0] ? "," : ""); strcat(m, k_mode_names[i]); }
     printf("level %2d %-24s %-9s deaths=%3d skips=%2d modes=[%s]%s%s%s%s\n", idx + 1,
            a->levels[idx].name, why, r->deaths, r->nskips, m, r->saw_dual ? " dual" : "",
@@ -842,6 +843,10 @@ static void botrun_summary(App *a, BotRun *r, int idx, const char *why)
     for (int i = 0; i < r->nskips; i++) printf("    skipped x=%.0f..%.0f\n", r->skip_from[i], r->skip_to[i]);
     fflush(stdout);
 }
+
+// Progress along the level. Turned gameplay and teleports make x useless, the distance covered is not.
+static float progress(const Game *gm) { return gm->has_jumps ? gm->travel : gm->p.x; }
+static float cp_progress(const Game *gm, const GameCheckpoint *c) { return gm->has_jumps ? c->s.travel : c->s.p.x; }
 
 // A failure (death, or no surviving plan) sends the bot back to an earlier checkpoint, where it
 // tries other decisions; how far back varies from attempt to attempt. Only when that fails many
@@ -859,8 +864,8 @@ static void botrun_retry(App *a, BotRun *r, float x)
     // each round of 13 attempts reaches further back (wrong turns can show up much later)
     const float back = 150.0f + 230.0f * (float)((r->fails - 1) % 13) + 900.0f * (float)((r->fails - 1) / 13);
     int k = 0;
-    for (int i = 0; i < r->ncp; i++) if (r->cps[i].s.p.x <= r->front_x - back) k = i;
-    if (r->ncp) { a->game.practice = &r->cps[k]; r->ncp = k + 1; r->next_cp_x = r->cps[k].s.p.x + BOT_CP_SPACING; }
+    for (int i = 0; i < r->ncp; i++) if (cp_progress(&a->game, &r->cps[i]) <= r->front_x - back) k = i;
+    if (r->ncp) { a->game.practice = &r->cps[k]; r->ncp = k + 1; r->next_cp_x = cp_progress(&a->game, &r->cps[k]) + BOT_CP_SPACING; }
     bot_init(&r->bot);
     r->bot.explore = r->fails > 1 ? (unsigned)r->fails : 0;
     r->bot.rng = (unsigned)(r->fails * 2654435761u) ^ (unsigned)r->front_x;
@@ -874,20 +879,20 @@ static int botrun_frame(App *a, BotRun *r, int idx)
     if (gm->finished) { botrun_summary(a, r, idx, "COMPLETE"); botrun_end(a, r); return 1; }
     int noclip = 0;
     for (int i = 0; i < r->nskips; i++)
-        if (gm->p.x >= r->skip_from[i] && gm->p.x <= r->skip_to[i]) noclip = 1;
+        if (progress(gm) >= r->skip_from[i] && progress(gm) <= r->skip_to[i]) noclip = 1;
     gm->noclip = noclip;
     gm->bot_strict = !noclip;
     const int stop = getenv("BOT_STOP") != NULL;   // debugging: end at the first failure
     if (!gm->p.dead) {
         if ((r->tick++ & 1) == 0) game_set_hold(gm, bot_decide(&r->bot, gm));
-        if (r->bot.explore && gm->p.x > r->front_x + 400.0f) r->bot.explore = 0;   // got past it
+        if (r->bot.explore && progress(gm) > r->front_x + 400.0f) r->bot.explore = 0;   // got past it
         // no survivable plan for 4 s of game time: treat it like a death
         if (!r->bot.found && !gm->noclip) r->nofound++; else if (r->bot.found) r->nofound = 0;
         if (r->nofound >= 240) {
             if (stop || getenv("BOT_LOG"))
                 printf("  L%d no plan at x=%.0f y=%.0f mode=%d grav=%d\n", idx + 1, gm->p.x, gm->p.y, gm->p.mode, gm->p.grav);
             if (stop) { botrun_summary(a, r, idx, "STOPPED"); botrun_end(a, r); return 1; }
-            botrun_retry(a, r, gm->p.x);
+            botrun_retry(a, r, progress(gm));
             gm->p.dead = 1;
             gm->p.dead_t = 1.0f;
         }
@@ -897,9 +902,9 @@ static int botrun_frame(App *a, BotRun *r, int idx)
                 pl->y = pl->mini ? 9.0f : 15.0f; pl->grav = 1; pl->yv = 0;
             }
         }
-        if (r->bot.found && !gm->p.dead && gm->p.x >= r->next_cp_x && r->ncp < BOT_MAX_CP && !gm->noclip) {
+        if (r->bot.found && !gm->p.dead && progress(gm) >= r->next_cp_x && r->ncp < BOT_MAX_CP && !gm->noclip) {
             game_checkpoint_save(gm, &r->cps[r->ncp++]);
-            r->next_cp_x = gm->p.x + BOT_CP_SPACING;
+            r->next_cp_x = progress(gm) + BOT_CP_SPACING;
         }
     }
     int was_dead = gm->p.dead;
@@ -907,8 +912,10 @@ static int botrun_frame(App *a, BotRun *r, int idx)
     {
         const char *t0 = getenv("GDTX0"), *t1 = getenv("GDTX1");
         if (t0 && t1 && gm->p.x >= (float)atof(t0) && gm->p.x <= (float)atof(t1))
-            printf("    x=%.1f y=%.1f yv=%.2f g=%d hold=%d og=%d rise=%d mode=%d found=%d\n", gm->p.x, gm->p.y,
-                   gm->p.yv, gm->p.grav, gm->p.hold, gm->p.on_ground, gm->p.rising, gm->p.mode, r->bot.found);
+            printf("    x=%.1f y=%.1f yv=%.2f g=%d hold=%d og=%d rise=%d mode=%d found=%d depth=%d dual=%d y2=%.1f g2=%d m2=%d fwd=%d,%d up=%d,%d ch=%d free=%d\n",
+                   gm->p.x, gm->p.y, gm->p.yv, gm->p.grav, gm->p.hold, gm->p.on_ground, gm->p.rising, gm->p.mode,
+                   r->bot.found, r->bot.depth_best, gm->dual, gm->p2.y, gm->p2.grav, gm->p2.mode,
+                   gm->frame.fx, gm->frame.fy, gm->frame.ux, gm->frame.uy, gm->channel, gm->free);
     }
     if (getenv("GDCAM") && ((int)gm->p.x % 60) < 3) printf("CAM x=%.0f y=%.0f cam=%.0f ctr=%.0f mode=%d dual=%d mini=%d grav=%d\n", gm->p.x, gm->p.y, gm->cam_bottom, gm->ctr, gm->p.mode, gm->dual, gm->p.mini, gm->p.grav);
     r->modes |= 1u << gm->p.mode;
@@ -922,7 +929,7 @@ static int botrun_frame(App *a, BotRun *r, int idx)
         if (stop || getenv("BOT_LOG"))
             printf("  L%d death %d at x=%.0f y=%.0f g=%d mini=%d dual=%d mode=%s (%s)\n", idx + 1, r->deaths, gm->p.x,
                    gm->p.y, gm->p.grav, gm->p.mini, gm->dual, k_mode_names[gm->p.mode], gm->death_info);
-        botrun_retry(a, r, gm->p.x);
+        botrun_retry(a, r, progress(gm));
         if (r->deaths > BOT_MAX_DEATHS) { botrun_summary(a, r, idx, "GAVE UP"); botrun_end(a, r); return 1; }
         if (stop) { botrun_summary(a, r, idx, "STOPPED"); botrun_end(a, r); return 1; }
     }
@@ -930,6 +937,9 @@ static int botrun_frame(App *a, BotRun *r, int idx)
 }
 
 // Fast, headless: plays one level to the end and prints a summary.
+static int save_shot(App *a, const char *path);
+static void render(App *a);
+
 static int selftest(App *a, int idx, float seconds)
 {
     if (start_level(a, idx) != 0) { puts("load failed"); return 1; }
@@ -937,10 +947,47 @@ static int selftest(App *a, int idx, float seconds)
     if (getenv("BOT_LOG")) setvbuf(stdout, NULL, _IONBF, 0);   // keep the log if the run is stopped
     static BotRun r;
     botrun_begin(&r);
+    // development: BOT_LOAD=<file> starts from a saved state; BOT_SAVE=<x>:<file> writes one when the
+    // bot passes x (BOT_SAVE_EXIT=1 stops there)
+    const char *load = getenv("BOT_LOAD"), *save = getenv("BOT_SAVE");
+    if (load) {
+        if (game_state_io(&a->game, load, 0)) { puts("cannot load the saved state"); return 1; }
+        game_checkpoint_save(&a->game, &r.cps[r.ncp++]);
+        r.next_cp_x = progress(&a->game) + BOT_CP_SPACING;
+        r.front_x = progress(&a->game);
+    }
+    float save_x = save ? (float)atof(save) : 0;
+    const char *save_path = save ? strchr(save, ':') : NULL;
+    // BOT_SAVE_EVERY=<prefix> keeps a state every 1500 units of progress (<prefix><n>.bin)
+    const char *every = getenv("BOT_SAVE_EVERY");
+    int saved_n = load ? (int)(progress(&a->game) / 1500.0f) : 0;
+    // BOT_SHOT=<prefix> saves a picture every 600 units of progress (<prefix><n>.png)
+    const char *shots = getenv("BOT_SHOT");
+    int shot_n = 0;
     long frames = 0;
     while (frames < (long)(seconds * 60)) {
         if (botrun_frame(a, &r, idx)) return 0;
         frames++;
+        if (shots && !a->game.p.dead && (int)(progress(&a->game) / 600.0f) > shot_n) {
+            char path[512];
+            shot_n = (int)(progress(&a->game) / 600.0f);
+            snprintf(path, sizeof path, "%s%02d.png", shots, shot_n);
+            render(a);
+            save_shot(a, path);
+        }
+        if (every && !a->game.p.dead && (int)(progress(&a->game) / 1500.0f) > saved_n) {
+            char path[512];
+            saved_n = (int)(progress(&a->game) / 1500.0f);
+            snprintf(path, sizeof path, "%s%d.bin", every, saved_n);
+            if (!game_state_io(&a->game, path, 1))
+                printf("checkpoint %d at x=%.0f (deaths %d, skips %d)\n", saved_n, a->game.p.x, r.deaths, r.nskips);
+        }
+        if (save_path && !a->game.p.dead && a->game.p.x >= save_x) {
+            if (game_state_io(&a->game, save_path + 1, 1)) puts("cannot save the state");
+            else printf("state saved at x=%.0f (deaths %d, skips %d)\n", a->game.p.x, r.deaths, r.nskips);
+            save_path = NULL;
+            if (getenv("BOT_SAVE_EXIT")) break;
+        }
     }
     botrun_summary(a, &r, idx, "TIMEOUT");
     botrun_end(a, &r);
@@ -1258,7 +1305,7 @@ int main(int argc, char **argv)
             else {
                 static char m[64];
                 m[0] = 0;
-                for (int i = 0; i < 7; i++) if (brun.modes & (1u << i)) { if (m[0]) strcat(m, ","); strcat(m, k_mode_names[i]); }
+                for (int i = 0; i < MODE_COUNT; i++) if (brun.modes & (1u << i)) { if (m[0]) strcat(m, ","); strcat(m, k_mode_names[i]); }
                 snprintf(g_bot_hud, sizeof g_bot_hud, "BOT  level %d  %s   deaths %d  skips %d  [%s]", bot_list[bot_pos] + 1,
                          a->levels[bot_list[bot_pos]].name, brun.deaths, brun.nskips, m);
             }

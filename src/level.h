@@ -5,8 +5,8 @@
 
 #include <stddef.h>
 
-#define GD_MAX_PROPS 24
-#define GD_MAX_GROUPS 6
+#define GD_MAX_PROPS 64    // 2.2 objects carry far more properties than older ones
+#define GD_MAX_GROUPS 10
 
 typedef struct {
     int key;
@@ -20,8 +20,13 @@ typedef struct {
     int flipx;    // key 4
     int flipy;    // key 5
     float scale;  // key 32, default 1
+    float scale_x, scale_y;     // keys 128 / 129 (2.2), 0 = use scale
+    signed char has_hsv1, has_hsv2;
+    float hsv1[5], hsv2[5];     // per-object colour shift of the base / detail colour (keys 41-44)
     int ngroups;                // key 57, "a.b.c"
     int groups[GD_MAX_GROUPS];
+    short list[16];             // key 152 (random weights) or 435 (sequence): "group.number" pairs
+    int nlist;
     int nprops;
     GdProp props[GD_MAX_PROPS]; // every key/value pair, for later features
 } GdObject;
