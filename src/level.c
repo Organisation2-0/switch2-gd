@@ -172,6 +172,7 @@ static void parse_object(char *rec, GdObject *o)
         case 42: o->has_hsv2 = v != 0; break;
         case 43: parse_hsv_string(tok, o->hsv1); break;
         case 44: parse_hsv_string(tok, o->hsv2); break;
+        case 49: o->has_copy_hsv = 1; parse_hsv_string(tok, o->copy_hsv); break;
         default: break;
         }
         if (o->nprops < GD_MAX_PROPS) {

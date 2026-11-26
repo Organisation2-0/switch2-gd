@@ -34,6 +34,7 @@ void config_defaults(Config *c)
     c->icon_ship = 1;
     c->col1 = 6;   // lime
     c->col2 = 12;  // cyan
+    snprintf(c->name, sizeof c->name, "Player");
 }
 
 int config_save(const Config *c, const char *path)
@@ -41,6 +42,7 @@ int config_save(const Config *c, const char *path)
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     fprintf(f, "icon_cube=%d\nicon_ship=%d\ncol1=%d\ncol2=%d\n", c->icon_cube, c->icon_ship, c->col1, c->col2);
+    fprintf(f, "name=%s\n", c->name);
     for (int i = 0; i < ACT_COUNT; i++)
         fprintf(f, "bind_%d=%d,%d,%d,%d\n", i, c->bind[i].key[0], c->bind[i].key[1], c->bind[i].joy[0],
                 c->bind[i].joy[1]);
@@ -60,6 +62,10 @@ int config_load(Config *c, const char *path)
         else if (sscanf(line, "icon_ship=%d", &v[0]) == 1) c->icon_ship = v[0];
         else if (sscanf(line, "col1=%d", &v[0]) == 1) c->col1 = v[0];
         else if (sscanf(line, "col2=%d", &v[0]) == 1) c->col2 = v[0];
+        else if (!strncmp(line, "name=", 5)) {
+            line[strcspn(line, "\r\n")] = 0;
+            snprintf(c->name, sizeof c->name, "%.23s", line + 5);
+        }
         else if (sscanf(line, "bind_%d=%d,%d,%d,%d", &idx, &v[0], &v[1], &v[2], &v[3]) == 5 && idx >= 0 &&
                  idx < ACT_COUNT) {
             c->bind[idx].key[0] = v[0]; c->bind[idx].key[1] = v[1];

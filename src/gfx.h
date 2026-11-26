@@ -67,6 +67,7 @@ void gfx_ninepatch(Gfx *g, const GfxImage *im, float border_src, SDL_FRect dst,
                    float border_dst, GdColorF c);
 
 void gfx_fill(Gfx *g, SDL_FRect rc, GdColorF c);
+void gfx_glow_fill(Gfx *g, SDL_FRect rc, GdColorF c);   // the same, blended additively
 void gfx_gradient_v(Gfx *g, SDL_FRect rc, GdColorF top, GdColorF bottom);
 
 int gfx_font_load(Gfx *g, const char *name, GfxFont *f); // name without extension

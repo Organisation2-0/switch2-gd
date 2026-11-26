@@ -24,8 +24,9 @@ New-Item -ItemType Directory -Force "$dres\levels", "$dest\levels" | Out-Null
 $patterns = @(
     'GJ_GameSheet-hd.*', 'GJ_GameSheet02-hd.*', 'GJ_GameSheet03-hd.*', 'GJ_GameSheet04-hd.*',
     'GJ_GameSheetGlow-hd.*', 'GJ_GameSheetIcons-hd.*', 'GJ_LaunchSheet-hd.*', 'FireSheet_01-hd.*', 'PixelSheet_01-hd.*', 'GJ_ParticleSheet-hd.*',
-    'bigFont-hd.*', 'GJ_gradientBG-hd.png', 'GJ_square01-hd.png',
-    'groundSquare_*_001-hd.png', 'game_bg_*_001-hd.png'
+    'bigFont-hd.*', 'goldFont-hd.*', 'square02_001-hd.png', 'GJ_progressBar_001-hd.png', 'smallDot-hd.png', 'slidergroove-hd.png', 'sliderthumb-hd.png', 'slidergroove2-hd.png', 'sliderBar2-hd.png', 'GJ_gradientBG-hd.png',
+    'groundSquare_*_001-hd.png', 'game_bg_*_001-hd.png',
+    'GJBeast0?_AnimDesc.plist', 'Robot_AnimDesc.plist', 'Spider_AnimDesc.plist'
 )
 $count = 0
 foreach ($p in $patterns) {

@@ -13,6 +13,10 @@
 #endif
 
 #include "../vendor/stb_image_write.h"
+#ifdef GD_ALIGN
+#include <dirent.h>
+#include "../vendor/stb_image.h"
+#endif
 #include "bot.h"
 #include "config.h"
 #include "game.h"
@@ -38,19 +42,28 @@ static const struct { const char *name; int diff, stars; } k_official[] = {
     {"Dry Out", 2, 4},          {"Base After Base", 3, 5},     {"Can't Let Go", 3, 6},
     {"Jumper", 4, 7},           {"Time Machine", 4, 8},        {"Cycles", 4, 9},
     {"xStep", 5, 10},           {"Clutterfunk", 5, 11},        {"Theory of Everything", 5, 12},
-    {"Electroman Adventures", 5, 13}, {"Clubstep", 6, 14},     {"Electrodynamix", 5, 15},
-    {"Hexagon Force", 5, 10},   {"Blast Processing", 5, 10},   {"Theory of Everything 2", 5, 10},
-    {"Geometrical Dominator", 5, 10}, {"Deadlocked", 5, 10},   {"Fingerdash", 5, 10},
-    {"Dash", 5, 10},
+    {"Electroman Adventures", 5, 10}, {"Clubstep", 6, 14},     {"Electrodynamix", 5, 12},
+    {"Hexagon Force", 5, 12},   {"Blast Processing", 4, 10},   {"Theory of Everything 2", 6, 14},
+    {"Geometrical Dominator", 4, 10}, {"Deadlocked", 6, 15},   {"Fingerdash", 5, 12},
+    {"Dash", 5, 12},
 };
 
 static const char *const k_pad_names[16] = {"A", "B", "X", "Y", "L3", "R3", "L", "R",
                                             "ZL", "ZR", "+", "-", "Left", "Up", "Right", "Down"};
 
+typedef struct { float x, y, w, h; } Rect;     // centre and size
+typedef struct { Rect r; int id; } Hot;        // clickable area of the screen shown last
+enum { H_NONE, H_PLAY, H_GARAGE, H_SETTINGS, H_QUIT, H_BACK, H_PREV, H_NEXT, H_CARD, H_RESUME, H_RESTART, H_MENU };
+
 typedef struct {
     Gfx g;
-    GfxFont big;
-    GfxImage gradient, square, bar, bg, ground, ground_menu;
+    GfxFont big, gold;
+    GfxImage gradient, dark, bar, title_bg, bg, ground, ground2, ground_menu, groove, stripes, dot, slider, thumb;
+    float lw, lh;     // drawing size (1280x720; the level tour renders 16:10)
+    Hot hot[24];
+    int nhot;
+    Scene shown;      // screen of the last picture, and when it appeared
+    float shown_since;
     LevelEntry *levels;
     int nlevels, sel;
     Scene scene;
@@ -178,6 +191,11 @@ static void load_bg_images(App *a, const Game *gm)
     snprintf(name, sizeof name, "groundSquare_%02d_001-hd.png", gm->ground_id);
     if (gfx_load_image(&a->g, name, &a->ground))
         gfx_load_image(&a->g, "groundSquare_01_001-hd.png", &a->ground);
+    gfx_free_image(&a->ground2);
+    if (gm->ground_id >= 8) {   // grounds from 8 on come in two layers
+        snprintf(name, sizeof name, "groundSquare_%02d_2_001-hd.png", gm->ground_id);
+        if (gfx_load_image(&a->g, name, &a->ground2)) memset(&a->ground2, 0, sizeof a->ground2);
+    }
 }
 
 static int start_level(App *a, int idx)
@@ -188,6 +206,7 @@ static int start_level(App *a, int idx)
     snprintf(a->game.name, sizeof a->game.name, "%s", a->levels[idx].name);
     a->game.best_percent = a->levels[idx].best;
     load_bg_images(a, &a->game);
+    a->game.ground2 = &a->ground2;
     apply_skin(a);
     a->scene = SC_PLAY;
     a->paused = 0;
@@ -195,8 +214,6 @@ static int start_level(App *a, int idx)
 }
 
 // ------------------------------------------------------------ UI primitives
-
-typedef struct { float x, y, w, h; } Rect;
 
 static int inside(Rect r, float x, float y)
 {
@@ -225,37 +242,19 @@ static void text(App *a, const char *s, float x, float y, float sc, int align, G
 
 static void panel(App *a, SDL_FRect r)
 {
-    if (a->square.tex) gfx_ninepatch(&a->g, &a->square, a->square.w * 0.28f, r, 36, C(255, 255, 255, 1));
-    else gfx_fill(&a->g, r, C(0, 40, 140, 0.9f));
+    const GdColorF c = C(0, 0, 0, 125.0f / 255.0f);
+    if (a->dark.tex) gfx_ninepatch(&a->g, &a->dark, a->dark.w / 3.0f, r, 36, c);
+    else gfx_fill(&a->g, r, c);
 }
 
-static void draw_menu_background(App *a, float hue)
+// plain background of the garage and the settings
+static void draw_menu_background(App *a)
 {
-    Gfx *g = &a->g;
-    GdColorF top = C(0 + 20 * hue, 70 + 40 * hue, 230, 1), bot = C(0, 40, 160, 1);
-    gfx_gradient_v(g, (SDL_FRect){0, 0, UI_W, UI_H}, top, bot);
-    if (a->gradient.tex) {
-        float tile = 512, off = fmodf(a->t * 20, tile);
-        for (float x = -off; x < UI_W; x += tile)
-            for (float y = 0; y < UI_H; y += tile)
-                gfx_image_rect(g, &a->gradient,
-                               (SDL_FRect){0, 0, (float)a->gradient.w, (float)a->gradient.h},
-                               (SDL_FRect){x, y, tile, tile}, C(255, 255, 255, 0.12f));
-    }
-    // moving ground strip
-    float gh = 130;
-    if (a->ground_menu.tex) {
-        float tw = gh * a->ground_menu.w / (float)a->ground_menu.h;
-        float off = fmodf(a->t * 140, tw);
-        for (float x = -off; x < UI_W; x += tw)
-            gfx_image_rect(g, &a->ground_menu,
-                           (SDL_FRect){0, 0, (float)a->ground_menu.w, (float)a->ground_menu.h},
-                           (SDL_FRect){x, UI_H - gh, tw, gh}, C(0, 90, 255, 1));
-    } else {
-        gfx_fill(g, (SDL_FRect){0, UI_H - gh, UI_W, gh}, C(0, 70, 200, 1));
-    }
-    const GdFrame *line = gfx_find(g, "floorLine_01_001.png");
-    if (line) gfx_frame(g, line, UI_W / 2, UI_H - gh, 0, UI_W / line->w, 1.2f, WHITE, 1);
+    const GdColorF c = C(110, 110, 110, 1);
+    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(c.r * 0.6f, c.g * 0.6f, c.b * 0.6f, 1));
+    if (a->gradient.tex)
+        gfx_image_rect(&a->g, &a->gradient, (SDL_FRect){0, 0, (float)a->gradient.w, (float)a->gradient.h},
+                       (SDL_FRect){-2, -2, a->lw + 4.0f, a->lh + 4.0f}, c);
 }
 
 static GdColorF pal(int idx)
@@ -278,84 +277,298 @@ static void draw_icon(App *a, int ship, int icon, float x, float y, float sc, Gd
 
 // ------------------------------------------------------------ scenes
 
-static void draw_title(App *a)
+// ------------------------------------------------------------ the screens of the original
+//
+// Laid out in the original's coordinates: points, 320 of them from the bottom to the top of the
+// screen, positions measured in recordings of the game.
+
+static float pt_scale(const App *a) { return a->lh / 320.0f; }   // pixels per point
+static float pt_width(const App *a) { return a->lw / pt_scale(a); }
+
+static void hot_add(App *a, float x, float y, float w, float h, int id)
 {
-    draw_menu_background(a, 0.5f + 0.5f * sinf(a->t * 0.4f));
-    const GdFrame *logo = gfx_find(&a->g, "GJ_logo_001.png");
-    float bob = sinf(a->t * 1.6f) * 6;
-    if (logo) gfx_frame(&a->g, logo, UI_W / 2, 170 + bob, 0, 0.62f, 0.62f, WHITE, 0);
-    button(a, "GJ_playBtn_001.png", UI_W / 2, 440 + sinf(a->t * 2.2f) * 4, 0.9f, 1);
-    button(a, "GJ_garageBtn_001.png", UI_W / 2 - 260, 440, 1.0f, 0);
-    button(a, "GJ_optionsBtn_001.png", UI_W / 2 + 260, 440, 1.0f, 0);
-    text(a, "Garage", UI_W / 2 - 260, 505, 0.32f, 1, WHITE);
-    text(a, "Controls", UI_W / 2 + 260, 505, 0.32f, 1, WHITE);
-    text(a, "A / Enter / click: play   X / G: garage   Y / O: controls", UI_W / 2, 575, 0.3f, 1,
-         C(255, 255, 255, 0.85f));
-    text(a, "Fan-made engine - uses your own Geometry Dash files", UI_W / 2, 668, 0.28f, 1,
-         C(255, 255, 255, 0.6f));
+    const float p = pt_scale(a);
+    if (id && a->nhot < (int)(sizeof a->hot / sizeof a->hot[0]))
+        a->hot[a->nhot++] = (Hot){{x * p, (320.0f - y) * p, w * p, h * p}, id};
 }
 
-static void draw_stars(App *a, float x, float y, int n, float sc)
+// Sprite centred at (x,y); returns its frame (NULL if the sheets do not have it).
+static const GdFrame *spr(App *a, const char *name, float x, float y, float scale, GdColorF c, int flip)
 {
+    const GdFrame *f = gfx_find(&a->g, name);
+    if (!f) return NULL;
+    const float p = pt_scale(a), s = scale * p / a->g.atlas.px_per_unit;
+    gfx_frame(&a->g, f, x * p, (320.0f - y) * p, 0, flip ? -s : s, s, c, 0);
+    return f;
+}
+
+static void spr_button(App *a, const char *name, float x, float y, float scale, int id)
+{
+    const GdFrame *f = spr(a, name, x, y, scale, WHITE, 0);
+    if (f) hot_add(a, x, y, f->srcw * scale / a->g.atlas.px_per_unit, f->srch * scale / a->g.atlas.px_per_unit, id);
+}
+
+// Empty secret coin, d points wide.
+static void spr_coin(App *a, float x, float y, float d)
+{
+    const GdFrame *c = gfx_find(&a->g, "gjCoinUI_01_off_001.png");
+    if (c) spr(a, "gjCoinUI_01_off_001.png", x, y, d * a->g.atlas.px_per_unit / c->srcw, WHITE, 0);
+}
+
+// Text centred vertically at y; align as in gfx_text; narrowed to max_w points if it is wider.
+static void label(App *a, const GfxFont *f, const char *s, float x, float y, float scale, int align, GdColorF c,
+                  float max_w)
+{
+    const float p = pt_scale(a);
+    float k = scale * p * 0.5f;   // the fonts are stored at two pixels per point
+    const float w = gfx_text_width(f, s, k);
+    if (max_w > 0 && w > max_w * p) k *= max_w * p / w;
+    gfx_text(&a->g, f, s, x * p, (320.0f - y) * p - f->line_h * k * 0.5f, k, align, c);
+}
+
+// Rounded panel (nine-slice) covering x0..x0+w, y0..y0+h.
+static void pt_panel(App *a, const GfxImage *im, float x0, float y0, float w, float h, GdColorF c)
+{
+    const float p = pt_scale(a);
+    const SDL_FRect r = {x0 * p, (320.0f - y0 - h) * p, w * p, h * p};
+    if (!im->tex) { gfx_fill(&a->g, r, c); return; }
+    const float border = im->w / 3.0f;
+    gfx_ninepatch(&a->g, im, border, r, fminf(border * 0.5f, h * 0.5f) * p, c);
+}
+
+// Progress bar with its percentage, centred at (x,y).
+static void pt_bar(App *a, float x, float y, float percent, GdColorF fill)
+{
+    const float p = pt_scale(a), w = 340.0f, h = 20.0f;
+    const float left = (x - w * 0.5f) * p, top = (320.0f - y - h * 0.5f) * p;
+    if (a->bar.tex) {
+        gfx_image_rect(&a->g, &a->bar, (SDL_FRect){0, 0, (float)a->bar.w, (float)a->bar.h},
+                       (SDL_FRect){left, top, w * p, h * p}, C(0, 0, 0, 125.0f / 255.0f));
+        const float part = fminf(fmaxf(percent / 100.0f, 0.0f), 1.0f);
+        if (part > 0)
+            gfx_image_rect(&a->g, &a->bar, (SDL_FRect){0, 0, a->bar.w * part, (float)a->bar.h},
+                           (SDL_FRect){left + 1.4f * p, top + 1.4f * p, (w - 2.8f) * part * p, (h - 2.8f) * p}, fill);
+    }
     char s[16];
-    snprintf(s, sizeof s, "%d", n);
-    const GdFrame *st = gfx_find(&a->g, "GJ_starsIcon_001.png");
-    text(a, s, x - 18, y - 22 * sc * 2, sc, 2, WHITE);
-    if (st) gfx_frame(&a->g, st, x + 6, y, 0, 0.5f, 0.5f, WHITE, 0);
+    snprintf(s, sizeof s, "%d%%", (int)percent);
+    label(a, &a->big, s, x, y - 0.5f, 0.6f, 1, WHITE, 0);
+}
+
+// Volume slider as shown in the pause menu (there is no sound, it only shows the original's place).
+static void pt_slider(App *a, float x0, float x1, float y, float at)
+{
+    const float p = pt_scale(a), w = x1 - x0, h = w * a->slider.h / (a->slider.w ? a->slider.w : 1);
+    if (!a->slider.tex || !a->thumb.tex) return;
+    gfx_fill(&a->g, (SDL_FRect){(x0 + 2.0f) * p, (320.0f - y - h * 0.22f) * p, (w - 4.0f) * at * p, h * 0.44f * p},
+             C(60, 200, 255, 1));
+    gfx_image_rect(&a->g, &a->slider, (SDL_FRect){0, 0, (float)a->slider.w, (float)a->slider.h},
+                   (SDL_FRect){x0 * p, (320.0f - y - h * 0.5f) * p, w * p, h * p}, WHITE);
+    const float d = 18.0f;
+    gfx_image_rect(&a->g, &a->thumb, (SDL_FRect){0, 0, (float)a->thumb.w, (float)a->thumb.h},
+                   (SDL_FRect){(x0 + w * at - d * 0.5f) * p, (320.0f - y - d * 0.5f) * p, d * p, d * p}, WHITE);
+}
+
+// Scrolling ground whose surface lies at height `top`.
+static void menu_ground(App *a, float top, GdColorF c, float scroll)
+{
+    const float p = pt_scale(a), tile = 128.0f * p, y = (320.0f - top) * p;
+    if (a->ground_menu.tex) {
+        const float off = fmodf(scroll * p, tile);
+        for (float x = -off; x < a->lw; x += tile)
+            gfx_image_rect(&a->g, &a->ground_menu,
+                           (SDL_FRect){0, 0, (float)a->ground_menu.w, (float)a->ground_menu.h},
+                           (SDL_FRect){x, y, tile, tile}, c);
+    } else {
+        gfx_fill(&a->g, (SDL_FRect){0, y, a->lw, a->lh - y}, c);
+    }
+    const GdFrame *line = gfx_find(&a->g, "floorLine_01_001.png");
+    if (line)
+        gfx_frame(&a->g, line, a->lw * 0.5f, y, 0, a->lw / (float)line->w, p / a->g.atlas.px_per_unit, WHITE, 1);
+}
+
+// The colour of the title screen wanders around the colour circle.
+static GdColorF title_colour(float t)
+{
+    static const unsigned char k[12][3] = {
+        {255, 0, 255}, {255, 0, 125}, {255, 0, 0},   {255, 125, 0}, {255, 255, 0}, {125, 255, 0},
+        {0, 255, 0},   {0, 255, 125}, {0, 255, 255}, {0, 125, 255}, {0, 0, 255},   {125, 0, 255}};
+    const float at = t / 4.0f;
+    const int i = (int)at % 12, j = (i + 1) % 12;
+    const float f = at - floorf(at);
+    return C(k[i][0] + (k[j][0] - k[i][0]) * f, k[i][1] + (k[j][1] - k[i][1]) * f,
+             k[i][2] + (k[j][2] - k[i][2]) * f, 1);
+}
+
+// An icon that crosses the title screen on the ground, jumping now and then.
+static void title_runner(App *a)
+{
+    const float period = 5.0f;
+    const int n = (int)(a->t / period);
+    const float phase = a->t - n * period;
+    const float x = -60.0f + phase * 311.6f;
+    if (x > pt_width(a) + 60.0f) return;
+    const int icon = a->cube_icons[(n * 37 + 5) % a->n_cube];
+    const GdColorF c1 = pal((n * 11 + 3) % palette_size()), c2 = pal((n * 7 + 12) % palette_size());
+    // one jump of the cube lasts 0.43 s and is 65 units high
+    const float j = fmodf(phase + (n % 3) * 0.3f, 1.1f) / 0.43f;
+    const float up = j < 1.0f ? 260.0f * j * (1.0f - j) : 0.0f, rot = j < 1.0f ? 180.0f * j : 0.0f;
+    const float p = pt_scale(a), s = p / a->g.atlas.px_per_unit;
+    char n1[64], n2[64];
+    snprintf(n1, sizeof n1, "player_%02d_001.png", icon);
+    snprintf(n2, sizeof n2, "player_%02d_2_001.png", icon);
+    const GdFrame *f1 = gfx_find(&a->g, n1), *f2 = gfx_find(&a->g, n2);
+    const float px = x * p, py = (320.0f - 90.0f - 15.0f - up) * p;
+    if (f2) gfx_frame(&a->g, f2, px, py, rot, s, s, c2, 0);
+    if (f1) gfx_frame(&a->g, f1, px, py, rot, s, s, c1, 0);
+}
+
+static void draw_title(App *a)
+{
+    const float p = pt_scale(a), W = pt_width(a), mid = W * 0.5f;
+    const GdColorF c = title_colour(a->t);
+    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, c);
+    if (a->title_bg.tex) {
+        const float step = 1024.0f / 1.875f * p;
+        const float off = fmodf(a->t * 31.2f * p, step);
+        for (float x = -off; x < a->lw; x += step)
+            gfx_image_rect(&a->g, &a->title_bg, (SDL_FRect){0, 0, (float)a->title_bg.w, (float)a->title_bg.h},
+                           (SDL_FRect){x, a->lh - step, step, step}, c);
+    }
+    title_runner(a);
+    menu_ground(a, 90.0f, C(c.r * 0.72f, c.g * 0.72f, c.b * 0.72f, 1), a->t * 311.6f);
+
+    spr(a, "GJ_logo_001.png", mid, 270.0f, 1.0f, WHITE, 0);
+    spr_button(a, "GJ_closeBtn_001.png", 18.0f, 302.0f, 0.72f, H_QUIT);
+    spr_button(a, "GJ_playBtn_001.png", mid, 170.0f, 1.0f, H_PLAY);
+    spr_button(a, "GJ_garageBtn_001.png", mid - 110.0f, 170.0f, 1.0f, H_GARAGE);
+    spr_button(a, "GJ_creatorBtn_001.png", mid + 110.0f, 170.0f, 1.0f, H_NONE);
+    spr_button(a, "GJ_dailyRewardBtn_001.png", W - 40.0f, 178.0f, 1.0f, H_NONE);
+    spr_button(a, "GJ_profileButton_001.png", 45.0f, 105.0f, 1.0f, H_GARAGE);
+    if (a->cfg.name[0]) label(a, &a->gold, a->cfg.name, 47.0f, 140.0f, 0.5f, 1, WHITE, 86.0f);
+    static const struct { const char *name; float x, y, s; } social[] = {
+        {"gj_fbIcon_001.png", 22, 55, 0.8f},      {"gj_twIcon_001.png", 51, 55, 0.8f},
+        {"gj_ytIcon_001.png", 80, 55, 0.8f},      {"gj_twitchIcon_001.png", 109, 55, 0.8f},
+        {"gj_discordIcon_001.png", 109, 26, 0.8f}, {"robtoplogo_small.png", 50, 25, 0.8f}};
+    for (int i = 0; i < 6; i++) spr(a, social[i].name, social[i].x, social[i].y, social[i].s, WHITE, 0);
+    spr_button(a, "GJ_achBtn_001.png", mid - 83.5f, 45.0f, 1.0f, H_NONE);
+    spr_button(a, "GJ_optionsBtn_001.png", mid - 28.0f, 45.0f, 1.0f, H_SETTINGS);
+    spr_button(a, "GJ_statsBtn_001.png", mid + 27.5f, 45.0f, 1.0f, H_NONE);
+    spr_button(a, "GJ_ngBtn_001.png", mid + 83.0f, 45.0f, 1.0f, H_NONE);
+    spr_button(a, "GJ_newsBtn_001.png", W - 43.0f, 45.0f, 0.88f, H_NONE);
+    spr(a, "exMark_001.png", W - 28.0f, 67.0f, 0.7f, WHITE, 0);
+    label(a, &a->big, "Fan-made port - not affiliated with RobTop Games", mid, 9.0f, 0.24f, 1,
+          C(255, 255, 255, 0.75f), 0);
 }
 
 static void draw_select(App *a)
 {
-    Gfx *g = &a->g;
-    draw_menu_background(a, 0.2f);
-    LevelEntry *e = &a->levels[a->sel];
+    const float W = pt_width(a), mid = W * 0.5f;
+    static const unsigned char k_page[9][3] = {{0, 0, 255},   {255, 0, 255}, {255, 0, 125}, {255, 0, 0},
+                                               {255, 125, 0}, {255, 255, 0}, {0, 255, 0},   {0, 255, 255},
+                                               {0, 125, 255}};
+    const unsigned char *pc = k_page[a->sel % 9];
+    const GdColorF c = C(pc[0], pc[1], pc[2], 1);
+    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(c.r * 0.6f, c.g * 0.6f, c.b * 0.6f, 1));
+    if (a->gradient.tex)
+        gfx_image_rect(&a->g, &a->gradient, (SDL_FRect){0, 0, (float)a->gradient.w, (float)a->gradient.h},
+                       (SDL_FRect){-2, -2, a->lw + 4.0f, a->lh + 4.0f}, c);
+    menu_ground(a, 50.0f, C(c.r * 0.55f, c.g * 0.55f, c.b * 0.55f, 1), 0);
+    spr(a, "GJ_topBar_001.png", mid, 303.0f, 1.0f, WHITE, 0);
+    spr(a, "GJ_sideArt_001.png", 35.0f, 35.0f, 1.0f, WHITE, 0);
+    spr(a, "GJ_sideArt_001.png", W - 35.0f, 35.0f, 1.0f, WHITE, 1);
 
-    panel(a, (SDL_FRect){UI_W / 2 - 400, 150, 800, 400});
-    char title[128];
-    snprintf(title, sizeof title, "%s", e->name);
-    float tsc = 0.9f;
-    float tw = gfx_text_width(&a->big, title, tsc);
-    if (tw > 700) tsc *= 700 / tw;
-    text(a, title, UI_W / 2, 175, tsc, 1, WHITE);
-
-    char fn[48];
-    snprintf(fn, sizeof fn, "difficulty_%02d_btn_001.png", e->diff > 0 ? e->diff : 0);
-    const GdFrame *f = gfx_find(g, fn);
-    if (f) gfx_frame(g, f, UI_W / 2 - 250, 330, 0, 1.0f, 1.0f, WHITE, 0);
-    if (e->diff > 0) draw_stars(a, UI_W / 2 - 250, 405, e->stars, 0.5f);
-
-    button(a, "GJ_playBtn2_001.png", UI_W / 2 + 30, 330, 1.25f, 1);
-
-    {
-        float bx = UI_W / 2 - 300, by = 480, bw = 600, bh = 34;
-        gfx_fill(g, (SDL_FRect){bx, by, bw, bh}, C(0, 0, 0, 0.55f));
-        float p = e->best / 100.0f;
-        if (p > 0) gfx_fill(g, (SDL_FRect){bx + 3, by + 3, (bw - 6) * p, bh - 6}, C(80, 255, 60, 1));
-        char pc[32];
-        snprintf(pc, sizeof pc, "%d%%", (int)e->best);
-        text(a, pc, UI_W / 2, by - 3, 0.36f, 1, WHITE);
-        text(a, "Normal Mode", UI_W / 2, by - 34, 0.28f, 1, C(255, 255, 255, 0.8f));
+    const LevelEntry *e = &a->levels[a->sel];
+    pt_panel(a, &a->dark, mid - 170.0f, 172.5f, 340.0f, 95.0f, C(0, 0, 0, 125.0f / 255.0f));
+    hot_add(a, mid, 220.0f, 340.0f, 95.0f, H_CARD);
+    char name[48];
+    snprintf(name, sizeof name, "diffIcon_%02d_btn_001.png", e->diff > 0 ? e->diff : 0);
+    const float tw = fminf(gfx_text_width(&a->big, e->name, 0.9f * 0.5f), 244.0f);
+    const float left = mid - (42.0f + tw) * 0.5f - 4.0f;
+    spr(a, name, left + 13.0f, 223.0f, 1.1f, WHITE, 0);
+    label(a, &a->big, e->name, left + 41.0f, 221.5f, 0.915f, 0, WHITE, 248.0f);
+    if (e->stars > 0) {
+        char s[16];
+        snprintf(s, sizeof s, "%d", e->stars);
+        spr(a, "GJ_starsIcon_001.png", mid + 155.0f, 255.0f, 0.8f, WHITE, 0);
+        label(a, &a->big, s, mid + 143.0f, 254.0f, 0.6f, 2, C(255, 230, 40, 1), 0);
     }
+    if (e->official)
+        for (int i = 0; i < 3; i++)
+            spr_coin(a, mid + 102.0f + i * 26.0f, 188.5f, 21.0f);
+    label(a, &a->big, "Normal Mode", mid, 149.0f, 0.5f, 1, WHITE, 0);
+    pt_bar(a, mid, 130.0f, e->best, C(0, 255, 0, 1));
+    label(a, &a->big, "Practice Mode", mid, 99.0f, 0.5f, 1, WHITE, 0);
+    pt_bar(a, mid, 80.0f, 0, C(0, 255, 255, 1));
+    label(a, &a->big, "Download the soundtrack", mid, 34.0f, 0.5f, 1, WHITE, 0);
+    const float step = a->nlevels > 1 ? fminf(16.0f, (W - 60.0f) / (a->nlevels - 1)) : 16.0f;
+    for (int i = 0; i < a->nlevels && a->dot.tex; i++) {
+        const float p = pt_scale(a), x = mid + (i - (a->nlevels - 1) * 0.5f) * step, d = 8.0f;
+        gfx_image_rect(&a->g, &a->dot, (SDL_FRect){0, 0, (float)a->dot.w, (float)a->dot.h},
+                       (SDL_FRect){(x - d * 0.5f) * p, (320.0f - 15.0f - d * 0.5f) * p, d * p, d * p},
+                       i == a->sel ? WHITE : C(125, 125, 125, 1));
+    }
+    spr(a, "sideBtn_death_001.png", W - 20.0f, 260.0f, 1.0f, WHITE, 0);
 
-    const GdFrame *ar = gfx_find(g, "GJ_arrow_01_001.png");
-    if (ar) {
-        if (a->sel > 0) gfx_frame(g, ar, 110, UI_H / 2 - 20, 0, 1.2f, 1.2f, WHITE, 0);
-        if (a->sel < a->nlevels - 1) gfx_frame(g, ar, UI_W - 110, UI_H / 2 - 20, 0, -1.2f, 1.2f, WHITE, 0);
-    }
-    for (int i = 0; i < a->nlevels && i < 40; i++) {
-        float x = UI_W / 2 + (i - (a->nlevels - 1) / 2.0f) * 22;
-        gfx_fill(g, (SDL_FRect){x - 5, 600, 10, 10}, i == a->sel ? C(255, 255, 255, 1) : C(255, 255, 255, 0.35f));
-    }
-    button(a, "GJ_backBtn_001.png", 80, 70, 1.0f, 0);
-    char info[64];
-    snprintf(info, sizeof info, "%d / %d", a->sel + 1, a->nlevels);
-    text(a, info, UI_W - 40, 40, 0.38f, 2, C(255, 255, 255, 0.8f));
+    spr_button(a, "GJ_arrow_01_001.png", 25.0f, 298.0f, 1.0f, H_BACK);
+    spr(a, "GJ_infoIcon_001.png", W - 20.0f, 300.0f, 1.0f, WHITE, 0);
+    spr(a, "navArrowBtn_001.png", 25.0f, 160.0f, 1.0f, WHITE, 1);
+    spr(a, "navArrowBtn_001.png", W - 25.0f, 160.0f, 1.0f, WHITE, 0);
+    hot_add(a, 25.0f, 160.0f, 50.0f, 90.0f, H_PREV);
+    hot_add(a, W - 25.0f, 160.0f, 50.0f, 90.0f, H_NEXT);
+}
+
+static void draw_pause(App *a)
+{
+    const Game *gm = &a->game;
+    const float W = pt_width(a), mid = W * 0.5f;
+    pt_panel(a, &a->dark, 10.0f, 10.0f, W - 20.0f, 300.0f, C(0, 0, 0, 0.75f));
+    label(a, &a->big, gm->name, mid, 288.0f, 0.8f, 1, WHITE, W - 120.0f);
+    char s[64];
+    snprintf(s, sizeof s, "Best: %d%%", (int)gm->best_percent);
+    label(a, &a->gold, s, mid, 253.0f, 0.5f, 1, WHITE, 0);
+    label(a, &a->big, "Normal Mode", mid, 235.0f, 0.5f, 1, WHITE, 0);
+    pt_bar(a, mid, 215.0f, gm->percent, C(0, 255, 0, 1));
+    spr_button(a, "GJ_practiceBtn_001.png", mid - 123.0f, 130.0f, 0.92f, H_NONE);
+    spr_button(a, "GJ_playBtn2_001.png", mid - 38.0f, 130.0f, 1.0f, H_RESUME);
+    spr_button(a, "GJ_menuBtn_001.png", mid + 47.0f, 130.0f, 0.92f, H_MENU);
+    spr_button(a, "GJ_replayBtn_001.png", mid + 123.0f, 130.0f, 0.92f, H_RESTART);
+    spr(a, "gj_songIcon_001.png", mid - 191.0f, 70.0f, 0.8f, WHITE, 0);
+    pt_slider(a, mid - 173.0f, mid - 27.0f, 70.0f, 0.2f);
+    spr(a, "GJ_sfxIcon_001.png", mid + 10.0f, 70.0f, 0.8f, WHITE, 0);
+    pt_slider(a, mid + 27.0f, mid + 173.0f, 70.0f, 0.2f);
+    spr(a, "sideBtn_death_001.png", 36.0f, 284.0f, 1.0f, WHITE, 0);
+    spr(a, "sideBtn_marker_001.png", 36.0f, 250.0f, 1.0f, WHITE, 0);
+    spr(a, "sideBtn_quests_001.png", 36.0f, 216.0f, 1.0f, WHITE, 0);
+    spr_button(a, "sideBtn_options_001.png", W - 36.0f, 284.0f, 1.0f, H_NONE);
+    spr(a, "sideBtn_hide_001.png", W - 36.0f, 250.0f, 1.0f, WHITE, 0);
+    for (int i = 0; i < 3; i++)
+        spr_coin(a, mid + (i - 1) * 45.5f, 33.0f, 24.0f);
+}
+
+static void draw_complete(App *a)
+{
+    const Game *gm = &a->game;
+    const float W = pt_width(a), mid = W * 0.5f;
+    gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(0, 0, 0, 100.0f / 255.0f));
+    pt_panel(a, &a->dark, mid - 190.0f, 45.0f, 380.0f, 235.0f, C(0, 0, 0, 180.0f / 255.0f));
+    spr(a, "GJ_levelComplete_001.png", mid, 250.0f, 0.8f, WHITE, 0);
+    char s[64];
+    snprintf(s, sizeof s, "Attempts: %d", gm->attempts);
+    label(a, &a->gold, s, mid, 200.0f, 0.8f, 1, WHITE, 0);
+    snprintf(s, sizeof s, "Jumps: %d", gm->jumps);
+    label(a, &a->gold, s, mid, 175.0f, 0.8f, 1, WHITE, 0);
+    const int sec = (int)gm->time;
+    snprintf(s, sizeof s, "Time: %02d:%02d", sec / 60, sec % 60);
+    label(a, &a->gold, s, mid, 150.0f, 0.8f, 1, WHITE, 0);
+    label(a, &a->big, "Awesome!", mid, 112.0f, 0.8f, 1, WHITE, 0);
+    spr_button(a, "GJ_replayBtn_001.png", mid - 95.0f, 52.0f, 1.0f, H_RESTART);
+    spr_button(a, "GJ_menuBtn_001.png", mid + 95.0f, 52.0f, 1.0f, H_MENU);
 }
 
 // ---- garage (skins) ----
 
 static const float k_garage_row_y[4] = {210, 325, 435, 520};
-#define PAL_X 720.0f
+#define PAL_X 690.0f
 #define PAL_Y 215.0f
 #define PAL_CELL 40.0f
 #define PAL_COLS 12
@@ -363,10 +576,10 @@ static const float k_garage_row_y[4] = {210, 325, 435, 520};
 static void draw_garage(App *a)
 {
     Gfx *g = &a->g;
-    draw_menu_background(a, 0.1f);
+    draw_menu_background(a);
     panel(a, (SDL_FRect){100, 120, 1080, 500});
     text(a, "Garage", UI_W / 2, 130, 0.8f, 1, WHITE);
-    button(a, "GJ_backBtn_001.png", 80, 70, 1.0f, 0);
+    button(a, "GJ_arrow_01_001.png", 56, 55, 1.15f, 0);
 
     GdColorF c1 = pal(a->cfg.col1), c2 = pal(a->cfg.col2);
     const GdFrame *ar = gfx_find(g, "GJ_arrow_01_001.png");
@@ -438,10 +651,10 @@ static void binding_label(const Config *c, int act, int col, char *out, size_t n
 static void draw_controls(App *a)
 {
     Gfx *g = &a->g;
-    draw_menu_background(a, 0.3f);
+    draw_menu_background(a);
     panel(a, (SDL_FRect){100, 110, 1080, 520});
     text(a, "Controls", UI_W / 2, 118, 0.8f, 1, WHITE);
-    button(a, "GJ_backBtn_001.png", 80, 70, 1.0f, 0);
+    button(a, "GJ_arrow_01_001.png", 56, 55, 1.15f, 0);
 
     static const char *const heads[4] = {"Key 1", "Key 2", "Pad 1", "Pad 2"};
     for (int c = 0; c < 4; c++) text(a, heads[c], k_ctl_x[c], 172, 0.28f, 1, C(255, 255, 255, 0.8f));
@@ -470,45 +683,56 @@ static void draw_controls(App *a)
 
 static char g_bot_hud[256];
 
+// Progress bar and percentage as in the original.
+static void draw_hud(App *a)
+{
+    Game *gm = &a->game;
+    Gfx *g = &a->g;
+    const float u = a->lh / VIEW_H;                    // pixels per game unit
+    const float pct = fminf(fmaxf(gm->percent, 0.0f), 100.0f);
+    const float w = 210.0f * u, h = 16.0f * u, x = a->lw / 2 - w / 2, y = 0.0f;
+    if (a->groove.tex && a->stripes.tex) {
+        const float tile = 32.0f * u, left = x + 2.0f * u, fill = (w - 4.0f * u) * pct / 100.0f;
+        GdColorF c = {gm->c1[0], gm->c1[1], gm->c1[2], 1};
+        for (float at = 0; at < fill; at += tile) {
+            const float part = fminf(tile, fill - at);
+            gfx_image_rect(g, &a->stripes, (SDL_FRect){0, 0, a->stripes.w * part / tile, (float)a->stripes.h},
+                           (SDL_FRect){left + at, y + h * 0.25f, part, h * 0.5f}, c);
+        }
+        gfx_image_rect(g, &a->groove, (SDL_FRect){0, 0, (float)a->groove.w, (float)a->groove.h},
+                       (SDL_FRect){x, y, w, h}, WHITE);
+    } else {
+        gfx_fill(g, (SDL_FRect){x, y + 8, w, 14}, C(0, 0, 0, 0.5f));
+        gfx_fill(g, (SDL_FRect){x + 2, y + 10, (w - 4) * pct / 100.0f, 10}, C(90, 255, 70, 1));
+    }
+    char s[16];
+    snprintf(s, sizeof s, "%d%%", (int)pct);
+    text(a, s, x + w + 5.0f * u, y - 2.0f * u, 0.6f, 0, WHITE);
+}
+
 static void draw_play(App *a)
 {
     Game *gm = &a->game;
     Gfx *g = &a->g;
-    float scale = UI_H / VIEW_H;
-    float vw = UI_W / scale;
+    float scale = a->lh / VIEW_H;
+    float vw = a->lw / scale;
     game_draw(gm, g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
 
-    float bw = 340, bx = UI_W / 2 - bw / 2, by = 18;
-    gfx_fill(g, (SDL_FRect){bx, by, bw, 14}, C(0, 0, 0, 0.5f));
-    gfx_fill(g, (SDL_FRect){bx + 2, by + 2, (bw - 4) * gm->percent / 100.0f, 10}, C(90, 255, 70, 1));
     char s[128];
-    snprintf(s, sizeof s, "%d%%", (int)gm->percent);
-    text(a, s, UI_W / 2 + bw / 2 + 12, by - 8, 0.34f, 0, WHITE);
-    if (gm->time < 2.0f && !gm->finished) {
+    // "Attempt N" stands in the level, in the middle of the first screen
+    const float at_x = pt_width(a) * 0.5f - gm->cam_x;
+    if (at_x > -150.0f && !gm->finished) {
         snprintf(s, sizeof s, "Attempt %d", gm->attempts);
-        float al = gm->time < 1.4f ? 1 : (2.0f - gm->time) / 0.6f;
-        text(a, s, UI_W / 2, 330, 0.9f, 1, C(255, 255, 255, al));
+        label(a, &a->big, s, at_x, 243.0f - (gm->cam_bottom - -90.0f), 1.0f, 1, WHITE, 0);
     }
-    button(a, "GJ_pauseBtn_001.png", UI_W - 50, 50, 0.7f, 0);
+    draw_hud(a);
+#ifdef __SWITCH__
+    button(a, "GJ_pauseBtn_001.png", UI_W - 50, 50, 0.7f, 0);   // the original shows it on touch devices
+#endif
     if (g_bot_hud[0]) text(a, g_bot_hud, 20, 672, 0.32f, 0, C(255, 255, 255, 0.9f));
 
-    if (gm->finished) {
-        gfx_fill(g, (SDL_FRect){0, 0, UI_W, UI_H}, C(0, 0, 0, 0.45f));
-        const GdFrame *lc = gfx_find(g, "GJ_levelComplete_001.png");
-        if (lc) gfx_frame(g, lc, UI_W / 2, 220, 0, 1.0f, 1.0f, WHITE, 0);
-        snprintf(s, sizeof s, "Attempts: %d", gm->attempts);
-        text(a, s, UI_W / 2, 360, 0.5f, 1, WHITE);
-        button(a, "GJ_replayBtn_001.png", UI_W / 2 - 110, 500, 1.1f, 1);
-        button(a, "GJ_menuBtn_001.png", UI_W / 2 + 110, 500, 1.1f, 1);
-    } else if (a->paused) {
-        gfx_fill(g, (SDL_FRect){0, 0, UI_W, UI_H}, C(0, 0, 0, 0.6f));
-        text(a, "Paused", UI_W / 2, 150, 1.0f, 1, WHITE);
-        snprintf(s, sizeof s, "%s", gm->name);
-        text(a, s, UI_W / 2, 250, 0.5f, 1, C(255, 255, 255, 0.85f));
-        button(a, "GJ_replayBtn_001.png", UI_W / 2 - 170, 430, 1.1f, 1);
-        button(a, "GJ_playBtn2_001.png", UI_W / 2, 430, 1.3f, 1);
-        button(a, "GJ_menuBtn_001.png", UI_W / 2 + 170, 430, 1.1f, 1);
-    }
+    if (gm->finished) draw_complete(a);
+    else if (a->paused) draw_pause(a);
 }
 
 // ------------------------------------------------------------ input
@@ -590,8 +814,7 @@ static void do_left_right(App *a, int dir)
 {
     switch (a->scene) {
     case SC_SELECT:
-        if (dir < 0 && a->sel > 0) a->sel--;
-        if (dir > 0 && a->sel < a->nlevels - 1) a->sel++;
+        if (a->nlevels > 0) a->sel = (a->sel + dir + a->nlevels) % a->nlevels;   // the list wraps around
         break;
     case SC_GARAGE: garage_step(a, dir); break;
     case SC_CONTROLS: a->ctl_col = (a->ctl_col + dir + 4) % 4; break;
@@ -638,22 +861,28 @@ static void to_ui(App *a, int px, int py, float *ux, float *uy)
     int w, h;
     SDL_GetWindowSize(a->g.win, &w, &h);
     *ux = px * UI_W / (float)w;
-    *uy = py * UI_H / (float)h;
+    *uy = py * a->lh / (float)h;
 }
+
+static void do_left_right(App *a, int dir);
 
 static void on_click(App *a, float x, float y, int right)
 {
+    int hit = H_NONE;
+    for (int i = a->nhot - 1; i >= 0 && !hit; i--)
+        if (inside(a->hot[i].r, x, y)) hit = a->hot[i].id;
     switch (a->scene) {
     case SC_TITLE:
-        if (inside((Rect){UI_W / 2 - 260, 440, 130, 130}, x, y)) a->scene = SC_GARAGE;
-        else if (inside((Rect){UI_W / 2 + 260, 440, 130, 130}, x, y)) a->scene = SC_CONTROLS;
-        else a->scene = SC_SELECT;
+        if (hit == H_PLAY) a->scene = SC_SELECT;
+        else if (hit == H_GARAGE) a->scene = SC_GARAGE;
+        else if (hit == H_SETTINGS) a->scene = SC_CONTROLS;
+        else if (hit == H_QUIT) a->quit = 1;
         break;
     case SC_SELECT:
-        if (x < 200 && y < 130) { a->scene = SC_TITLE; break; }
-        if (x < 220 && a->sel > 0) { a->sel--; break; }
-        if (x > UI_W - 220 && a->sel < a->nlevels - 1) { a->sel++; break; }
-        if (y > 150 && y < 550) press_play(a);
+        if (hit == H_BACK) a->scene = SC_TITLE;
+        else if (hit == H_PREV) do_left_right(a, -1);
+        else if (hit == H_NEXT) do_left_right(a, 1);
+        else if (hit == H_CARD) press_play(a);
         break;
     case SC_GARAGE: {
         if (x < 200 && y < 130) { on_back(a); break; }
@@ -683,16 +912,15 @@ static void on_click(App *a, float x, float y, int right)
         break;
     }
     case SC_PLAY:
-        if (a->game.finished) {
-            if (inside((Rect){UI_W / 2 - 110, 500, 130, 130}, x, y)) restart(a);
-            else if (inside((Rect){UI_W / 2 + 110, 500, 130, 130}, x, y)) leave_level(a);
-        } else if (a->paused) {
-            if (inside((Rect){UI_W / 2 - 170, 430, 130, 130}, x, y)) restart(a);
-            else if (inside((Rect){UI_W / 2, 430, 150, 150}, x, y)) a->paused = 0;
-            else if (inside((Rect){UI_W / 2 + 170, 430, 130, 130}, x, y)) leave_level(a);
-        } else if (x > UI_W - 100 && y < 100) {
-            a->paused = 1;
-        } else {
+        if (a->game.finished || a->paused) {
+            if (hit == H_RESTART) restart(a);
+            else if (hit == H_MENU) leave_level(a);
+            else if (hit == H_RESUME) a->paused = 0;
+        }
+#ifdef __SWITCH__
+        else if (x > UI_W - 100 && y < 100) a->paused = 1;
+#endif
+        else {
             game_set_hold(&a->game, 1);
         }
         break;
@@ -1025,6 +1253,7 @@ static int save_shot(App *a, const char *path)
 static void render(App *a)
 {
     gfx_begin_frame(&a->g);
+    a->nhot = 0;
     switch (a->scene) {
     case SC_TITLE: draw_title(a); break;
     case SC_SELECT: draw_select(a); break;
@@ -1032,10 +1261,86 @@ static void render(App *a)
     case SC_GARAGE: draw_garage(a); break;
     case SC_CONTROLS: draw_controls(a); break;
     }
+    if (a->scene != a->shown) {
+        a->shown = a->scene;
+        a->shown_since = a->t;
+    }
+    const float dark = 1.0f - (a->t - a->shown_since) / 0.25f;
+    if (dark > 0) gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(0, 0, 0, fminf(dark, 1.0f)));
     gfx_present(&a->g);
 }
 
 // ------------------------------------------------------------ level tour (visual comparison aid)
+
+#ifdef GD_ALIGN
+// Alignment against recordings of the original game (GD_TOURREF=<folder with *_pNNNN.jpg>):
+// the tour then looks for the camera position whose picture matches the recorded one best.
+// Needs -DGD_ALIGN -DSTBI_ONLY_JPEG.
+#define REF_W 320
+#define REF_H 200
+
+// horizontal brightness steps of the picture scaled to REF_W x REF_H (independent of colour tints)
+static void ref_edges(const unsigned char *px, int w, int h, float *out)
+{
+    static float g[REF_H][REF_W];
+    for (int y = 0; y < REF_H; y++)
+        for (int x = 0; x < REF_W; x++) {
+            int sum = 0, n = 0;
+            for (int yy = y * h / REF_H; yy < (y + 1) * h / REF_H; yy++)
+                for (int xx = x * w / REF_W; xx < (x + 1) * w / REF_W; xx++, n++) {
+                    const unsigned char *p = px + (yy * w + xx) * 4;
+                    sum += p[0] + 2 * p[1] + p[2];
+                }
+            g[y][x] = n ? sum / (4.0f * n) : 0;
+        }
+    for (int y = 0; y < REF_H; y++)
+        for (int x = 0; x < REF_W; x++) {
+            const float d = x > 0 && x < REF_W - 1 ? g[y][x + 1] - g[y][x - 1] : 0;
+            // only hard edges: the soft ones of the background move at their own speed
+            out[y * REF_W + x] = fabsf(d) < 22.0f ? 0.0f : fminf(fmaxf(d, -70.0f), 70.0f);
+        }
+}
+
+// best normalised correlation over vertical shifts of up to +-24 rows (96 screen px)
+static float ref_score(const float *a, const float *b, int *shift)
+{
+    float best = -2;
+    for (int dy = -24; dy <= 24; dy++) {
+        double ab = 0, aa = 0, bb = 0;
+        for (int y = 36; y < 176; y++)
+            for (int x = 1; x < REF_W - 1; x++) {
+                const float p = a[y * REF_W + x], q = b[(y + dy) * REF_W + x];
+                ab += p * q; aa += p * p; bb += q * q;
+            }
+        const float v = (float)(ab / sqrt(aa * bb + 1e-9)) - 0.0004f * abs(dy);
+        if (v > best) { best = v; *shift = dy; }
+    }
+    return best;
+}
+
+static int ref_load(const char *dir, int mark, float *edges)
+{
+    char suffix[24], path[900] = "";
+    snprintf(suffix, sizeof suffix, "_p%04d.jpg", mark);
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    for (struct dirent *e; (e = readdir(d));) {
+        const size_t n = strlen(e->d_name);
+        if (e->d_name[0] == 'f' && n > 10 && !strcmp(e->d_name + n - 10, suffix)) {
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            break;
+        }
+    }
+    closedir(d);
+    int w, h, c;
+    unsigned char *px = path[0] ? stbi_load(path, &w, &h, &c, 4) : NULL;
+    if (!px) return -1;
+    ref_edges(px, w, h, edges);
+    stbi_image_free(px);
+    return 0;
+}
+#endif
+
 //
 // Runs a level without input and without deaths (like the original game with noclip) and saves a
 // picture each time the player reaches one of the requested progress values (per mille).
@@ -1050,26 +1355,68 @@ static int tour(App *a, int idx, const char *marks, const char *dir, float extra
     game_reset(gm);
     for (const char *s = marks; s && *s; ) {
         const int mark = atoi(s);
-        const float target = len * (float)mark / 1000.0f + 240.0f;
+        float target = len * (float)mark / 1000.0f + 240.0f;
+#ifdef GD_ALIGN
+        static float want[REF_W * REF_H], have[REF_W * REF_H];
+        const char *refdir = getenv("GD_TOURREF");
+        const int aligned = refdir && !ref_load(refdir, mark, want);
+        float best = -2, best_x = 0;   // spots: 100 units before and after the expected one
+        int best_dy = 0;
+        char best_path[700];
+        snprintf(best_path, sizeof best_path, "%s/p%04d.png", dir, mark);
+        const float from = target - 100.0f;
+        if (aligned) target += 100.0f;
+#endif
         for (int frame = 0; gm->p.x < target && !gm->finished && frame < 60 * 600; frame++) {
             gm->noclip = 1;
             Player *pl = &gm->p;
             if (pl->y > 1100.0f || (pl->y > 420.0f && pl->grav < 0 && pl->mode == M_CUBE)) {
                 pl->y = 15.0f; pl->grav = 1; pl->yv = 0;
             }
-            game_update(gm, 1.0f / 60.0f);
+            float dt = 1.0f / 60.0f;
+            int shown = frame % 2 == 0 || gm->p.x >= target - 60.0f;
+#ifdef GD_ALIGN
+            if (aligned && gm->p.x >= from) { dt = 1.0f / 240.0f; shown = 1; }   // finer steps near the spot
+#endif
+            game_update(gm, dt);
             // the camera is advanced while drawing too, so draw (without showing) every frame
-            if (frame % 2 == 0 || gm->p.x >= target - 60.0f) {
+            if (shown) {
                 gfx_begin_frame(&a->g);
                 game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+#ifdef GD_ALIGN
+                if (aligned && gm->p.x >= from) {
+                    int w, h, dy = 0;
+                    if (getenv("GD_TOURHUD")) draw_hud(a);
+                    unsigned char *px = gfx_read_pixels(&a->g, &w, &h);
+                    if (px) {
+                        ref_edges(px, w, h, have);
+                        free(px);
+                        const float v = ref_score(have, want, &dy);
+                        if (v > best) {
+                            best = v; best_x = gm->p.x; best_dy = dy;
+                            save_shot(a, best_path);
+                        }
+                    }
+                }
+#endif
             }
         }
-        gfx_begin_frame(&a->g);
-        game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
-        char path[700];
-        snprintf(path, sizeof path, "%s/p%04d.png", dir, mark);
-        if (save_shot(a, path)) { printf("cannot write %s\n", path); return 1; }
-        printf("p%04d x=%.0f y=%.0f mode=%d\n", mark, gm->p.x, gm->p.y, gm->p.mode);
+#ifdef GD_ALIGN
+        if (aligned && best > -2) {
+            // dx: distance from the expected spot; dy: screen px the recording sits lower than the port
+            printf("p%04d x=%.0f dx=%.0f dy=%d score=%.3f mode=%d\n", mark, best_x, best_x - (target - 100.0f),
+                   best_dy * 4, best, gm->p.mode);
+        } else
+#endif
+        {
+            gfx_begin_frame(&a->g);
+            game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+            if (getenv("GD_TOURHUD")) draw_hud(a);   // laid out for 1280x720, close enough at 1280x800
+            char path[700];
+            snprintf(path, sizeof path, "%s/p%04d.png", dir, mark);
+            if (save_shot(a, path)) { printf("cannot write %s\n", path); return 1; }
+            printf("p%04d x=%.0f y=%.0f mode=%d\n", mark, gm->p.x, gm->p.y, gm->p.mode);
+        }
         gfx_present(&a->g);
         const char *c = strchr(s, ',');
         s = c ? c + 1 : NULL;
@@ -1089,6 +1436,7 @@ int main(int argc, char **argv)
     int shot_mirror = 0, shot_mini = 0, shot_flip = 0, shot_dual = 0;
     int bot_speed = 1;
     const char *tour_marks = NULL, *tour_dir = ".";
+    int tall = 0;     // 16:10 screenshots, to compare with recordings of the original
     float tour_len = 0.0f;
     snprintf(a->resdir, sizeof a->resdir, "%s",
 #ifdef __SWITCH__
@@ -1130,6 +1478,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--flip")) shot_flip = 1;
         else if (!strcmp(argv[i], "--dual")) shot_dual = 1;
         else if (!strcmp(argv[i], "--tour") && i + 1 < argc) tour_marks = argv[++i];
+        else if (!strcmp(argv[i], "--tall")) tall = 1;
         else if (!strcmp(argv[i], "--tourdir") && i + 1 < argc) tour_dir = argv[++i];
         else if (!strcmp(argv[i], "--tourlen") && i + 1 < argc) tour_len = (float)atof(argv[++i]);
     }
@@ -1140,7 +1489,9 @@ int main(int argc, char **argv)
     fprintf(stderr, "gd-switch2 start, res=%s\n", a->resdir);
 #endif
     // the tour renders in 16:10 like the recordings of the original game
-    int rc_init = gfx_init(&a->g, a->resdir, 1280, tour_marks ? 800 : 720, fullscreen);
+    a->lw = UI_W;
+    a->lh = tour_marks || tall ? 800.0f : UI_H;
+    int rc_init = gfx_init(&a->g, a->resdir, (int)a->lw, (int)a->lh, fullscreen);
     if (rc_init != 0) {
         fprintf(stderr, "init failed rc=%d (resources: %s)\n", rc_init, a->resdir);
 #ifdef __SWITCH__
@@ -1171,8 +1522,16 @@ int main(int argc, char **argv)
     fprintf(stderr, "gfx ok (%dx%d), %d sheets\n", a->g.w, a->g.h, a->g.atlas.nsheets);
     gfx_font_load(&a->g, "bigFont", &a->big);
     gfx_load_image(&a->g, "GJ_gradientBG-hd.png", &a->gradient);
-    gfx_load_image(&a->g, "GJ_square01-hd.png", &a->square);
+    gfx_font_load(&a->g, "goldFont", &a->gold);
+    gfx_load_image(&a->g, "square02_001-hd.png", &a->dark);
+    gfx_load_image(&a->g, "GJ_progressBar_001-hd.png", &a->bar);
+    gfx_load_image(&a->g, "game_bg_01_001-hd.png", &a->title_bg);
+    gfx_load_image(&a->g, "smallDot-hd.png", &a->dot);
+    gfx_load_image(&a->g, "slidergroove-hd.png", &a->slider);
+    gfx_load_image(&a->g, "sliderthumb-hd.png", &a->thumb);
     gfx_load_image(&a->g, "groundSquare_01_001-hd.png", &a->ground_menu);
+    gfx_load_image(&a->g, "slidergroove2-hd.png", &a->groove);
+    gfx_load_image(&a->g, "sliderBar2-hd.png", &a->stripes);
     scan_levels(a);
     config_load(&a->cfg, a->cfg_path);
     a->cube_icons = scan_icons(a, "player_%02d_001.png", 400, &a->n_cube);

@@ -6,6 +6,11 @@
 #include "gfx.h"
 #include "level.h"
 #include "objchild.h"
+#include "anim.h"
+
+// animations loaded with every level
+enum { AN_BEAST1, AN_BEAST2, AN_BEAST3, AN_BEAST4, AN_BEAST5, AN_ROBOT_RUN, AN_ROBOT_JUMP, AN_ROBOT_FALL,
+       AN_SPIDER_RUN, AN_SPIDER_FALL, AN_BITE, AN_COUNT };
 
 typedef enum { OT_DECO, OT_SOLID, OT_HAZARD, OT_PORTAL, OT_PAD, OT_ORB, OT_SPEED, OT_TRIGGER, OT_HIDDEN, OT_FORCE, OT_SENSOR, OT_HBLOCK } ObjType;
 
@@ -27,8 +32,10 @@ enum { K_YELLOW = 1, K_BLUE, K_PINK, K_GREEN, K_RED, K_BLACK, K_DASH, K_DASH_FLI
 #define CH_OBJ 1004
 #define CH_P1 1005
 #define CH_P2 1006
+#define CH_GROUND2 1009
 #define CH_BLACK 1010
 #define CH_WHITE 1011
+#define CH_LIGHTER 1012
 
 typedef struct {
     float r, g, b, a;    // current value (0..255 rgb)
@@ -37,6 +44,7 @@ typedef struct {
     float fr, fg, fb, fa, tr, tg, tb, ta, t, dur;
     int fading;
     int copy, copy_op, player;       // copy another channel (+ its opacity) / follow player colour 1 or 2
+    int next_player;                 // player colour the running fade ends in
     int hsv_on, sadd, vadd;
     int lbg;                         // default "light background" channel: mix of background and colour 1
     float hs, ss, vs;                // hue shift (degrees), saturation and value factor/offset
@@ -59,6 +67,7 @@ typedef struct {
     // groups, moving objects and the extra trigger types (move, toggle, alpha, spawn)
     short grp[GD_MAX_GROUPS];
     short hsv1, hsv2;              // 1 + index into Game.hsv: own colour shift of main / detail (0 = none)
+    short copy_hsv;                // the same for the colour a trigger copies from another channel
     unsigned char ngrp, mover, off, spawn_only;
     float x0, y0, rot0;            // initial position and rotation (movers are put back on every attempt)
     int tid;                       // trigger object id
@@ -80,6 +89,14 @@ typedef struct {
     unsigned char freemode;        // 2.2 form portal: no play area borders
     unsigned char passable;        // 2.2 one-way block: only landing on it counts
     unsigned char nodraw;          // hidden by the level, or an editor-only helper
+    unsigned char invisible;       // "invisible" block / spike: only shows away from the icon
+    unsigned char fill;            // shaded filler square: never blended additively
+    unsigned char faint;           // black decoration that only shades what is behind it
+    unsigned char beat;            // sized by the music: 1 = decoration ball, 2 = orb
+    unsigned char solid_fill;      // block with an opaque black filling: no transition at the screen edges
+    unsigned char two_colour;      // has a base and a detail colour by default
+    unsigned char lighter;         // its detail colour is the "lighter" shade
+    unsigned char no_fade, no_enter;   // set by the level: no fading / no movement at the screen edges
     unsigned char tgrav;           // 2.2 teleport: 1 = normal gravity, 2 = flipped, 3 = toggle at the exit
     float tforce;                  // 2.2 teleport: upward speed the icon leaves the exit with (static force)
     const GdFrame *glow;           // soft light drawn behind the object
@@ -92,7 +109,7 @@ typedef struct {
 
 #define GD_GROUPS 10000
 #define GD_MAX_PART 400
-typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; } Particle;
+typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; int square; } Particle;
 typedef struct { const GdChild *c; int n; const GdFrame *f[12]; } KidSet;
 #define GD_MAX_MOVES 64
 #define GD_MAX_SPAWNS 64
@@ -111,6 +128,8 @@ typedef struct {            // state of the 2.2 logic triggers
     unsigned rng;
 } Logic;
 typedef struct { int obj; float x, y, rot; unsigned char used, used2, tdone, off; } UndoEntry;
+#define GD_GHOSTS 8
+typedef struct { float x, y, rot, age; int mode, mini, grav; } Ghost;   // one image of the icon's ghost trail
 #define GD_MAX_PULSES 96
 typedef struct {   // pulse trigger: a colour flashed onto a channel or a group (visual only)
     int target, group, copy, only;      // only: 1 = main sprite, 2 = detail sprite, 0 = both
@@ -152,6 +171,10 @@ typedef struct {
     Channel ch0[CH_COUNT]; // header-time colours, restored on every attempt
     int ch0_valid;
     int bg_id, ground_id;
+    const GfxImage *ground2;      // second layer of the ground texture (2.1 grounds), set by the app
+    Anim *anim;                   // AN_COUNT entries (monsters, robot, spider)
+    struct { int id, n; const GdFrame *main[16], *kid[16]; } loops[8]; int nloops;   // looping fires
+    int ball_type;                // look of the music balls on rods (picked per level load, 1..3)
     float end_x;
     int start_mode, start_speed;
     Player p, p2;                 // p2 only exists while dual != 0
@@ -185,6 +208,9 @@ typedef struct {
     float ctr;                    // camera centre for restricted modes (OpenGD m_fCameraYCenter)
     Particle pt[GD_MAX_PART]; int npt;   // visual-only particles (not part of snapshots)
     float anim_t, emit_t;         // render time for idle animations, particle emit timer
+    int draw_under;               // drawing pass for the colour sprites that lie below their layer
+    Ghost ghost[GD_GHOSTS]; int ghost_on, ghost_next; float ghost_t;
+    float shake_left, shake_amp, shake_every;   // camera shake: seconds left, units, seconds per jolt
     int dead_fx;                  // death burst already spawned
     int enter_fx;                 // id of the active enter effect trigger (0 = fade)
     Pulse pu[GD_MAX_PULSES]; int npu;
@@ -202,6 +228,7 @@ typedef struct {
     float c1[3], c2[3];
     int skin_set;
     int attempts, finished;
+    int jumps;                    // button presses of this attempt (end screen)
     float best_percent, percent;
     char name[96];
     char death_info[96];   // what killed the player last (debug)

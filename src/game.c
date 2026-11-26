@@ -69,6 +69,7 @@ static void parse_header(Game *gm, const char *h)
     for (int i = 0; i < CH_COUNT; i++) { gm->ch[i].r = gm->ch[i].g = gm->ch[i].b = 255; gm->ch[i].a = 1; }
     set_channel(gm, CH_BG, 40, 125, 255, 0);
     set_channel(gm, CH_GROUND, 0, 102, 255, 0);
+    set_channel(gm, CH_GROUND2, 0, 102, 255, 0);
     set_channel(gm, CH_LINE, 255, 255, 255, 1);
     set_channel(gm, CH_3DL, 255, 255, 255, 0);
     set_channel(gm, CH_OBJ, 255, 255, 255, 0);
@@ -98,16 +99,17 @@ static void parse_header(Game *gm, const char *h)
             for (char *e = strtok_r(l2, "|", &s2); e; e = strtok_r(NULL, "|", &s2)) {
                 parse_kv_underscore(e, keys, vals, 24, &n);
                 int id = (int)kv_get(keys, vals, n, 6, -1);
-                if (id < 0 || id == 1007) continue;   // light BG is always derived, whatever the header lists
+                // light BG is always derived and black / white are fixed, whatever the header lists
+                if (id < 0 || id == 1007 || id == CH_BLACK || id == CH_WHITE) continue;
                 set_channel(gm, id, kv_get(keys, vals, n, 1, 255), kv_get(keys, vals, n, 2, 255),
                             kv_get(keys, vals, n, 3, 255), (int)kv_get(keys, vals, n, 5, 0));
                 gm->ch[id].a = kv_get(keys, vals, n, 7, 1);
                 gm->ch[id].player = (int)kv_get(keys, vals, n, 4, -1);
                 if (gm->ch[id].player < 1 || gm->ch[id].player > 2) gm->ch[id].player = 0;
                 gm->ch[id].copy = (int)kv_get(keys, vals, n, 9, 0);
-                gm->ch[id].copy_op = (int)kv_get(keys, vals, n, 10, 0);
+                gm->ch[id].copy_op = (int)kv_get(keys, vals, n, 17, 0);
                 if (gm->ch[id].copy > 0) {
-                    const char *h = strstr(e, "_11_");
+                    const char *h = strstr(e, "_10_");
                     if (h) parse_hsv(&gm->ch[id], h + 4);
                 }
                 if (gm->ch[id].a <= 0 && n > 0 && id != CH_LINE) gm->ch[id].a = 1;
@@ -115,14 +117,16 @@ static void parse_header(Game *gm, const char *h)
             free(l2);
         } else if (key[0] == 'k' && key[1] == 'S' && strlen(key) == 4) {
             int ks = atoi(key + 2);
-            static const int old_map[] = {29, CH_BG, 30, CH_GROUND, 31, CH_LINE, 32, CH_OBJ, 33, CH_3DL,
-                                          34, 1, 35, 2, 36, 3, 37, 4};
+            static const int old_map[] = {29, CH_BG, 30, CH_GROUND, 31, CH_LINE, 32, CH_OBJ, 33, 1,
+                                          34, 2, 35, 3, 36, 4, 37, CH_3DL};
             for (unsigned i = 0; i < sizeof old_map / sizeof old_map[0]; i += 2)
                 if (ks == old_map[i]) {
                     parse_kv_underscore(val, keys, vals, 24, &n);
                     set_channel(gm, old_map[i + 1], kv_get(keys, vals, n, 1, 255),
                                 kv_get(keys, vals, n, 2, 255), kv_get(keys, vals, n, 3, 255),
                                 (int)kv_get(keys, vals, n, 5, 0));
+                    const int player = (int)kv_get(keys, vals, n, 4, 0);
+                    gm->ch[old_map[i + 1]].player = player == 1 || player == 2 ? player : 0;
                 }
         } else if (!strcmp(key, "kA6")) {
             gm->bg_id = atoi(val) > 0 ? atoi(val) : 1;
@@ -150,6 +154,8 @@ static int trigger_channel(int id)
     case 104: return CH_LINE;
     case 105: return CH_OBJ;
     case 744: return CH_3DL;
+    case 900: return CH_GROUND2;
+    case 915: return CH_LINE;
     case 221: return 1;
     case 717: return 2;
     case 718: return 3;
@@ -189,6 +195,19 @@ static const GdFrame *sibling(Gfx *g, const char *frame, const char *from, const
     return gfx_find(g, name);
 }
 
+// Objects the original keeps turning (saw blades and the round decorations), degrees per second.
+// One speed for all: blades and the wheels drawn over them have to stay in step.
+static float spin_speed(const char *fr)
+{
+    static const char *const k[] = {
+        "sawblade_", "spinBlade", "blade_", "darkblade_", "lightBlade_", "blackCogwheel_", "bladeTrap", "d_cogwheel_",
+        "d_wheel_", "d_spikewheel_", "d_cartwheel_", "d_roundCloud_", "d_rotatingBall_", "d_geometric_", "d_ringSeg_",
+        "d_spiral_", "d_rotatingLine_", "d_rotatingSquare_", "d_ringSpiral_"};
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (starts(fr, k[i])) return -360.0f;
+    return 0.0f;
+}
+
 static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
 {
     const char *fr = gd_object_frame(src->id);
@@ -202,22 +221,28 @@ static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->tblend = (int)gd_obj_prop(src, 17, 0);
         o->topacity = gd_obj_prop(src, 35, 1);
         int c = trigger_channel(src->id);
-        o->ttarget = c == -2 ? (int)gd_obj_prop(src, 23, 0) : c;
+        // a colour trigger without a channel (key 23) means channel 1
+        o->ttarget = c == -2 ? (int)gd_obj_prop(src, 23, 1) : c;
         return;
     }
     if (!fr || starts(fr, "edit_") || starts(fr, "GJ_")) return;
+    char variant[32];
+    if (src->id == 9) {   // the original picks one of three looks for every spike pit
+        const unsigned h = ((unsigned)(int)src->x * 2654435761u) ^ ((unsigned)(int)src->y * 40503u) ^ (unsigned)gm->ball_type;
+        snprintf(variant, sizeof variant, "pit_%02u_001.png", 1 + (h >> 11) % 3);
+        if (gfx_find(g, variant)) fr = variant;
+    }
     o->main = gfx_find(g, fr);
     if (!o->main) return;
+    o->fill = starts(fr, "square_c_") || starts(fr, "square_f_");
+    o->faint = starts(fr, "d_pixelArt01_") != 0;
     const float ppu = g->atlas.px_per_unit;
     float w = o->main->srcw / ppu, h = o->main->srch / ppu;
-    o->detail = sibling(g, fr, "_001.png", "_2_001.png");
+    // (for the pits 06 / 07 the "_2" sprite is an object of its own, not a second layer)
+    o->detail = starts(fr, "pit_0") ? NULL : sibling(g, fr, "_001.png", "_2_001.png");
     if (!o->detail) o->detail = sibling(g, fr, "_001.png", "_color_001.png");
     o->extra = sibling(g, fr, "_001.png", "_extra_001.png");
-    o->spin = 0;
-    if (starts(fr, "sawblade_01")) o->spin = -200.0f;
-    else if (starts(fr, "sawblade_02")) o->spin = -240.0f;
-    else if (starts(fr, "sawblade_03")) o->spin = -300.0f;
-    else if (starts(fr, "spinBlade") || starts(fr, "blade_")) o->spin = -360.0f;
+    o->spin = spin_speed(fr) * (o->sx * o->sy < 0 ? -1.0f : 1.0f);
     o->type = OT_DECO;
     o->hw = w * 0.5f; o->hh = h * 0.5f; o->hx = o->hy = 0;
 
@@ -259,7 +284,7 @@ static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
                starts(fr, "invis_square")) {
         o->type = OT_SOLID;
         if (starts(fr, "plank_")) { o->hh = h * 0.5f; }
-        if (starts(fr, "invis_square")) o->main = NULL, o->detail = NULL;
+        /* invisible blocks are drawn, faded by their distance to the icon (invisible_alpha) */
     }
 }
 
@@ -395,7 +420,7 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
     classify_visual(gm, g, o, src);
     const int id = src->id;
     // triggers of newer versions that the engine acts on
-    const int newer = id == 2900 || id == 1935 || id == 3600 || id == 1917 || id == 2066 || id == 1347 || id == 1914 ||
+    const int newer = id == 32 || id == 33 || id == 1520 || id == 2900 || id == 1935 || id == 3600 || id == 1917 || id == 2066 || id == 1347 || id == 1914 ||
                       id == 1611 || id == 1811 || id == 1817 || id == 1912 || id == 2068 || id == 3607 || id == 1595 || id == 1815 || id == 3022;
     const int enter = (id >= 22 && id <= 28) || (id >= 55 && id <= 59) || id == 1915 || newer;
     if (o->type != OT_TRIGGER && (enter || id == 901 || id == 1007 || id == 1049 || id == 1268 || id == 1346 || id == 1006 ||
@@ -433,6 +458,7 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
             o->tcopy = (int)gd_obj_prop(src, 50, 0);
         }
         if (id == 1346 || id == 1616) o->tdur = gd_obj_prop(src, 10, 0);
+        if (id == 1520) o->tdur = gd_obj_prop(src, 10, 0.5f);
         o->touch = gd_obj_prop(src, 11, 0) != 0;
         o->tground = id == 29 && gd_obj_prop(src, 14, 0) != 0;   // old BG trigger with "tint ground"
         o->tplayer = gd_obj_prop(src, 15, 0) != 0 ? 1 : gd_obj_prop(src, 16, 0) != 0 ? 2 : 0;
@@ -457,14 +483,22 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
     }
     if (id >= 15 && id <= 17) {
         char bn[32];
-        snprintf(bn, sizeof bn, "rod_ball_%02d_001.png", id - 14);
+        snprintf(bn, sizeof bn, "rod_ball_%02d_001.png", gm->ball_type);
         o->ball = gfx_find(g, bn);
+    }
+    {
+        const char *name = gd_object_frame(id);
+        o->invisible = name && !strncmp(name, "invis_", 6);
     }
     // key 96: the object was placed with its glow switched off
     if (o->main && o->type != OT_TRIGGER && o->type != OT_ORB && o->type != OT_PAD && gd_obj_prop(src, 96, 0) == 0)
         o->glow = sibling(g, gd_object_frame(id), "_001.png", "_glow_001.png");
     int hidden_no_sprite = o->type == OT_HIDDEN && !o->main;
     apply_phys(o, src->id);
+    {
+        const char *name = gd_object_frame(id);
+        o->beat = o->type == OT_ORB ? 2 : name && !strncmp(name, "d_ball_", 7) ? 1 : 0;
+    }
     if (o->type == OT_PORTAL && o->sub == P_TELEPORT) {
         o->tdy = gd_obj_prop(src, 54, 0);
         o->tgroup = (int)gd_obj_prop(src, 51, 0);   // 2.2: exit marked by a group
@@ -490,7 +524,9 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->rground = (signed char)gd_obj_prop(src, 166, 0);
         o->rmove = (signed char)gd_obj_prop(src, 167, 0);
         o->value = id == 1935 ? gd_obj_prop(src, 120, 1.0f) : id == 2066 ? gd_obj_prop(src, 148, 1.0f)
-                 : id == 1912 ? gd_obj_prop(src, 10, 50.0f) : 0;   // 1912: random chance in percent
+                 : id == 1912 ? gd_obj_prop(src, 10, 50.0f)        // 1912: random chance in percent
+                 : id == 1520 ? gd_obj_prop(src, 75, 1.0f) : 0;    // 1520: shake strength
+        if (id == 1520) o->trate = gd_obj_prop(src, 84, 0);        // ... and seconds between jolts
     }
     // keep objects without a sprite only if they collide (invisible blocks, hitbox-only objects)
     if (hidden_no_sprite && o->type == OT_DECO) o->type = OT_HIDDEN;
@@ -546,6 +582,54 @@ static int editor_only(int id)
     return 0;
 }
 
+// Collects the numbered frames of a looping animation object (fires).
+static void add_loop(Game *gm, Gfx *g, int id)
+{
+    for (int i = 0; i < gm->nloops; i++) if (gm->loops[i].id == id) return;
+    if (gm->nloops >= (int)(sizeof gm->loops / sizeof gm->loops[0])) return;
+    const char *fr = gd_object_frame(id), *at = strstr(fr, "_looped_");
+    int cnt;
+    const GdChild *ch = gd_children_find(id, &cnt);
+    const char *kid = cnt > 0 ? ch[0].tex : NULL, *kat = kid ? strstr(kid, "_looped_") : NULL;
+    const int i = gm->nloops;
+    int n = 0;
+    for (; n < 16; n++) {
+        char name[96];
+        snprintf(name, sizeof name, "%.*s_looped_%03d.png", (int)(at - fr), fr, n + 1);
+        if (!(gm->loops[i].main[n] = gfx_find(g, name))) break;
+        gm->loops[i].kid[n] = NULL;
+        if (kat) {
+            snprintf(name, sizeof name, "%.*s_looped_%03d.png", (int)(kat - kid), kid, n + 1);
+            gm->loops[i].kid[n] = gfx_find(g, name);
+        }
+    }
+    if (n < 2) return;
+    gm->loops[i].id = id;
+    gm->loops[i].n = n;
+    gm->nloops++;
+}
+
+// The orange exit of a blue teleport portal is not stored in the level: it stands above or below
+// the entrance (key 54). It is added as an object of its own, for the picture only.
+static void add_teleport_exits(GdLevel *lvl)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < lvl->count; i++) n += lvl->objects[i].id == 747;
+    if (!n) return;
+    GdObject *all = realloc(lvl->objects, (lvl->count + n) * sizeof *all);
+    if (!all) return;
+    lvl->objects = all;
+    const size_t stored = lvl->count;
+    for (size_t i = 0; i < stored; i++) {
+        if (all[i].id != 747) continue;
+        GdObject *e = &all[lvl->count++];
+        *e = all[i];
+        e->id = 749;
+        e->y += gd_obj_prop(&all[i], 54, 0);
+        e->flipx = !e->flipx;   // it opens the other way
+    }
+}
+
 int game_load(Game *gm, Gfx *g, const char *path)
 {
     memset(gm, 0, sizeof *gm);
@@ -553,9 +637,12 @@ int game_load(Game *gm, Gfx *g, const char *path)
     if (gd_level_load(path, &lvl)) return -1;
     snprintf(gm->name, sizeof gm->name, "%s", lvl.name);
     gm->path = path;
+    // the original picks one look for all rod balls of a level at random
+    gm->ball_type = getenv("GD_HIDDEN") ? 2 : 1 + (int)(SDL_GetPerformanceCounter() % 3);
     parse_header(gm, lvl.header);
     memcpy(gm->ch0, gm->ch, sizeof gm->ch);
     gm->ch0_valid = 1;
+    add_teleport_exits(&lvl);
 
     gm->obj = calloc(lvl.count ? lvl.count : 1, sizeof(Obj));
     gm->by_z = malloc(sizeof(int) * (lvl.count + 1));
@@ -573,12 +660,16 @@ int game_load(Game *gm, Gfx *g, const char *path)
         o->sy = s->flipy ? -ky : ky;
         if (s->has_hsv1) o->hsv1 = (short)add_hsv(gm, s->hsv1);
         if (s->has_hsv2) o->hsv2 = (short)add_hsv(gm, s->hsv2);
+        if (s->has_copy_hsv) o->copy_hsv = (short)add_hsv(gm, s->copy_hsv);
         {   // draw order: stored in the level only when it differs from the object default
             const GdObjZ *oz = gd_objz_find(s->id);
             o->zlayer = (int)gd_obj_prop(s, 24, 0);
             o->zorder = (int)gd_obj_prop(s, 25, 0);
             if (o->zlayer == 0) o->zlayer = oz && oz->layer ? oz->layer : 5;
             if (o->zorder == 0 && oz) o->zorder = oz->order;
+            // the monsters lie in front of the waves of their layer
+            if (gd_obj_prop(s, 25, 0) == 0 && (s->id == 918 || s->id == 1327 || s->id == 1328 || s->id == 1584 || s->id == 2012))
+                o->zorder = 20;
         }
         {
             // default colour channels come from the object table (OpenGD); keys 21/22 override them
@@ -594,10 +685,25 @@ int game_load(Game *gm, Gfx *g, const char *path)
         }
         if (o->ch_main <= 0) o->ch_main = CH_OBJ;
         if (o->ch_detail <= 0) o->ch_detail = o->ch_main;
+        {   // "black" objects (pits, fill squares, saws) stay black when a level names the object colour
+            const GdObjChan *oc = gd_objchan_find(s->id);
+            if (oc && oc->kind == 2 && o->ch_main == CH_OBJ) o->ch_main = CH_BLACK;
+        }
         for (int k = 0; k < s->ngroups && k < GD_MAX_GROUPS; k++)
             if (s->groups[k] > 0 && s->groups[k] < GD_GROUPS) o->grp[o->ngrp++] = (short)s->groups[k];
         o->kidset = -1;
         classify(gm, g, o, s);
+        if (s->id == 749) {   // teleport exit: looks like a portal, does nothing
+            o->type = OT_PORTAL;
+            o->sub = P_OTHER;
+            o->hw = o->hh = 0;
+        }
+        if (o->type == OT_SPEED && gd_obj_prop(s, 24, 0) == 0) o->zlayer = 5;
+        // portals, pads and orbs carry their colours in the sprites: no object colour, no blending
+        if (o->type == OT_PORTAL || o->type == OT_PAD || o->type == OT_ORB || o->type == OT_SPEED) {
+            if (gd_obj_prop(s, 21, 0) == 0) o->ch_main = CH_WHITE;
+            if (gd_obj_prop(s, 22, 0) == 0) o->ch_detail = CH_WHITE;
+        }
         {   // levels made before 2.0 store the colour as "legacy channel" (key 19) instead of keys 21/22
             static const short legacy[9] = {0, CH_P1, CH_P2, 1, 2, 1007, 3, 4, CH_3DL};
             const int old = (int)gd_obj_prop(s, 19, 0);
@@ -622,7 +728,13 @@ int game_load(Game *gm, Gfx *g, const char *path)
                 o->detail = NULL;
                 o->extra = NULL;
                 // newer slope objects: the table names an outline sprite as the main one, the
-                // visible art are the children; textured ones are cut to the triangle
+                // art are the children; textured ones are cut to the triangle
+                // diagonal decorations: the child is the sprite turned into place, the main one is not shown
+                for (int k = 0; k < cnt; k++)
+                    if (o->main && gm->kidsets[o->kidset].f[k] == o->main && fmodf(fabsf(ch[k].rot), 90.0f) > 1.0f) {
+                        o->main = o->glow = NULL;
+                        if (o->type == OT_HIDDEN) o->type = OT_DECO;
+                    }
                 const char *fr = gd_object_frame(s->id);
                 if (fr && (!strcmp(fr, "blockOutline_14_001.png") || !strcmp(fr, "blockOutline_15_001.png"))) {
                     o->clipw = fr[14] == '5' ? 60 : 30;
@@ -630,12 +742,30 @@ int game_load(Game *gm, Gfx *g, const char *path)
                     // detail art keeps its own default colour when the level only recolours the base
                     if (oc && oc->primary > 0 && oc->primary < 1000 && gd_obj_prop(s, 22, 0) == 0)
                         o->ch_detail = oc->primary;
-                    o->main = NULL;
+                    if (o->type == OT_DECO) o->main = NULL;
                     o->glow = NULL;
                     if (o->type == OT_HIDDEN) o->type = OT_DECO;
                 }
             }
         }
+        o->no_fade = gd_obj_prop(s, 64, 0) != 0;
+        o->no_enter = gd_obj_prop(s, 67, 0) != 0;
+        // the black sludge is not in the colour table
+        if (s->id == 919 && gd_obj_prop(s, 21, 0) == 0) o->ch_main = o->ch_detail = CH_BLACK;
+        {
+            const GdObjChan *oc = gd_objchan_find(s->id);
+            o->two_colour = oc && oc->secondary > 0;
+            o->lighter = oc && oc->secondary == CH_LIGHTER;
+        }
+        {   // the original never fades blocks with an opaque black filling
+            const char *fr = gd_object_frame(s->id);
+            int cnt = 0;
+            const GdChild *ch = s->id >= 0 && s->id < 5000 ? gd_children_find(s->id, &cnt) : NULL;
+            if (fr && !strcmp(fr, "block005b_05_001.png")) o->solid_fill = 1;
+            for (int k = 0; k < cnt; k++) if (!strcmp(ch[k].tex, "block005b_05_001.png")) o->solid_fill = 1;
+            if (s->id >= 91 && s->id <= 96) o->solid_fill = 1;
+        }
+        if (o->main && gd_object_frame(s->id) && strstr(gd_object_frame(s->id), "_looped_")) add_loop(gm, g, s->id);
         if (o->type == OT_HIDDEN && !o->main) continue;
         o->nodraw = o->type != OT_TRIGGER && (gd_obj_prop(s, 135, 0) != 0 || (o->type != OT_PORTAL && o->type != OT_ORB &&
                     o->type != OT_PAD && editor_only(s->id)));
@@ -650,6 +780,20 @@ int game_load(Game *gm, Gfx *g, const char *path)
         gm->n++;
     }
     gd_level_free(&lvl);
+
+    gm->anim = calloc(AN_COUNT, sizeof(Anim));
+    if (gm->anim) {   // missing files leave an animation empty: the single sprite is drawn then
+        static const char *const an[AN_COUNT][2] = {
+            {"GJBeast01", "GJBeast01_idle01"}, {"GJBeast02", "GJBeast02_idle01"}, {"GJBeast03", "GJBeast03_idle01"},
+            {"GJBeast04", "GJBeast04_idle01"}, {"GJBeast05", "GJBeast05_idle01"}, {"Robot", "Robot_run"},
+            {"Robot", "Robot_jump_loop"}, {"Robot", "Robot_fall_loop"}, {"Spider", "Spider_run"},
+            {"Spider", "Spider_fall_loop"}, {"GJBeast01", "GJBeast01_bite"}};
+        for (int i = 0; i < AN_COUNT; i++) {
+            char file[64];
+            snprintf(file, sizeof file, "%s_AnimDesc.plist", an[i][0]);
+            anim_load(&gm->anim[i], g, file, an[i][1]);
+        }
+    }
 
     // groups (CSR lists), objects that move triggers can move, static broadphase order
     gm->grp_start = calloc(GD_GROUPS + 2, sizeof(int));
@@ -743,6 +887,7 @@ void game_free(Game *gm)
     free(gm->grp_start);
     free(gm->grp_items);
     free(gm->hsv);
+    free(gm->anim);
     free(gm->undo);
     free(gm->turns);
     free(gm->cblocks);
@@ -752,9 +897,13 @@ void game_free(Game *gm)
 
 void game_reset(Game *gm)
 {
+    gm->jumps = 0;
     gm->npt = 0; gm->dead_fx = 0; gm->emit_t = 0;
     gm->enter_fx = 0;
     gm->npu = gm->naf = 0;
+    gm->ghost_on = 0;
+    memset(gm->ghost, 0, sizeof gm->ghost);
+    gm->shake_left = 0;
     Player *p = &gm->p;
     memset(p, 0, sizeof *p);
     memset(&gm->p2, 0, sizeof gm->p2);
@@ -835,6 +984,15 @@ static void emit(Game *gm, float x, float y, float vx, float vy, float life, flo
     p->x = x; p->y = y; p->vx = vx; p->vy = vy;
     p->life = p->max = life; p->size = size; p->grow = grow;
     p->r = r; p->g = g; p->b = b; p->a = a;
+    p->square = 0;
+}
+
+// the little squares the icon kicks up
+static void emit_square(Game *gm, float x, float y, float vx, float vy, float life, float size, float r, float g, float b)
+{
+    const int n = gm->npt;
+    emit(gm, x, y, vx, vy, life, size, -3.0f, r, g, b, 0.9f);
+    if (gm->npt > n) gm->pt[n].square = 1;
 }
 
 static void emit_burst(Game *gm, float x, float y, int n, float speed, float life, float size,
@@ -889,8 +1047,8 @@ static void player_fx(Game *gm, const Player *p, int was_ground)
     if (p->on_ground && !was_ground && (p->mode == M_CUBE || p->mode == M_ROBOT || p->mode == M_BALL || p->mode == M_SPIDER)) {
         float fy = p->y - 14.0f * k * gsign;   // landing puff
         for (int i = 0; i < 6; i++)
-            emit(gm, p->x - 6 + frand() * 12, fy, (frand() - 0.7f) * 90.0f, gsign * (15.0f + frand() * 40.0f), 0.4f,
-                 7.0f * k, -9.0f, 255, 255, 255, 0.55f);
+            emit_square(gm, p->x - 6 + frand() * 12, fy, (frand() - 0.7f) * 90.0f, gsign * (15.0f + frand() * 40.0f), 0.4f,
+                        (2.5f + frand() * 2.5f) * k, gm->c1[0], gm->c1[1], gm->c1[2]);
     }
     gm->emit_t += STEP;
     if (gm->emit_t < 0.012f) return;
@@ -906,9 +1064,9 @@ static void player_fx(Game *gm, const Player *p, int was_ground)
             emit(gm, p->x + wx, p->y + wy, -30.0f * frand(), -gsign * (40.0f + frand() * 30.0f), 0.3f, 7.0f * k, -15.0f, 255, 255, 255, 0.7f);
     } else if (p->mode == M_WAVE) {
         emit(gm, p->x, p->y, -40.0f * frand(), (frand() - 0.5f) * 60.0f, 0.3f, 8.0f * k, -20.0f, gm->c1[0], gm->c1[1], gm->c1[2], 0.8f);
-    } else if (p->on_ground && p->mode != M_ROBOT) {   // faint dust trail while sliding along the floor
-        emit(gm, p->x - 12 * k, p->y - 14.0f * k * gsign, -50.0f - frand() * 30.0f, gsign * (5.0f + frand() * 25.0f), 0.35f,
-             5.0f * k, -8.0f, 255, 255, 255, 0.35f);
+    } else if (p->on_ground) {   // squares thrown up while sliding along the floor
+        emit_square(gm, p->x - 13 * k, p->y - 13.0f * k * gsign + frand() * 2.0f, 130.0f + frand() * 110.0f,
+                    gsign * (5.0f + frand() * 45.0f), 0.32f, (2.0f + frand() * 3.0f) * k, gm->c1[0], gm->c1[1], gm->c1[2]);
     }
 }
 
@@ -928,6 +1086,7 @@ static void particles_step(Game *gm, float dt)
 
 void game_set_hold(Game *gm, int down)
 {
+    if (down && !gm->input && !gm->sim && !gm->p.dead && !gm->finished) gm->jumps++;
     down = down != 0;
     if (down && !gm->input) {
         gm->p.hold = gm->p2.hold = 1;
@@ -943,15 +1102,27 @@ void game_set_hold(Game *gm, int down)
 
 static void start_fade(Game *gm, const Obj *t)
 {
-    if (t->ttarget < 0 || t->ttarget >= CH_COUNT) return;
+    if (t->ttarget < 0 || t->ttarget >= CH_COUNT || t->ttarget == CH_BLACK || t->ttarget == CH_WHITE) return;
     Channel *c = &gm->ch[t->ttarget];
-    c->player = t->tplayer;
+    const Channel *shown = &gm->ch[t->tplayer == 2 ? CH_P2 : CH_P1];
+    if (c->player) {   // leaving a player colour: start from what was shown
+        const Channel *now = &gm->ch[c->player == 2 ? CH_P2 : CH_P1];
+        c->r = now->r; c->g = now->g; c->b = now->b;
+    }
+    c->player = 0;
+    c->next_player = t->tplayer;
     c->lbg = 0;
     c->hsv_on = 0;
     c->copy = t->tcopy > 0 && t->tcopy < CH_COUNT && t->tcopy != t->ttarget ? t->tcopy : 0;
     c->copy_op = 0;
+    if (c->copy && t->copy_hsv > 0 && t->copy_hsv <= gm->nhsv) {   // the copied colour is shifted
+        const float *v = gm->hsv[t->copy_hsv - 1];
+        c->hsv_on = 1;
+        c->hs = v[0]; c->ss = v[1]; c->vs = v[2]; c->sadd = (int)v[3]; c->vadd = (int)v[4];
+    }
     c->fr = c->r; c->fg = c->g; c->fb = c->b; c->fa = c->a;
     c->tr = t->tr; c->tg = t->tg; c->tb = t->tb;
+    if (t->tplayer) { c->tr = shown->r; c->tg = shown->g; c->tb = shown->b; }
     c->ta = t->topacity;   // key 35, 1 when absent
     c->additive = t->tblend;
     c->t = 0;
@@ -960,6 +1131,7 @@ static void start_fade(Game *gm, const Obj *t)
     if (c->dur <= 0.001f) {
         c->r = c->tr; c->g = c->tg; c->b = c->tb; c->a = c->ta;
         c->fading = 0;
+        c->player = c->next_player;
     }
 }
 
@@ -1278,6 +1450,16 @@ static void fire_trigger(Game *gm, Obj *t, int depth)
         break;
     case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 55: case 56: case 57: case 58: case 59: case 1915:
         if (!gm->sim) gm->enter_fx = t->tid;   // visual only
+        break;
+    case 32: case 33:
+        if (!gm->sim) gm->ghost_on = t->tid == 32;
+        break;
+    case 1520:
+        if (!gm->sim) {
+            gm->shake_left = t->tdur;
+            gm->shake_amp = t->value;
+            gm->shake_every = t->trate;
+        }
         break;
     case 1007: // alpha (visual only), fading over the trigger's duration
         if (gm->sim || t->tgroup <= 0 || t->tgroup >= GD_GROUPS) break;
@@ -2277,11 +2459,26 @@ static void step(Game *gm, float d)
     }
 }
 
+// A new image of the ghost trail every 0.05 s; each one fades within 0.4 s.
+static void ghosts_step(Game *gm, float dt)
+{
+    for (int i = 0; i < GD_GHOSTS; i++)
+        if (gm->ghost[i].age > 0 && (gm->ghost[i].age += dt) > 0.4f) gm->ghost[i].age = 0;
+    gm->ghost_t += dt;
+    if (!gm->ghost_on || gm->p.dead || gm->ghost_t < 0.05f) return;
+    gm->ghost_t = 0;
+    const Player *p = &gm->p;
+    gm->ghost[gm->ghost_next] = (Ghost){p->x, p->y, p->rot, 0.001f, p->mode, p->mini, p->grav};
+    gm->ghost_next = (gm->ghost_next + 1) % GD_GHOSTS;
+}
+
 void game_update(Game *gm, float dt)
 {
     if (dt > 0.1f) dt = 0.1f;
     gm->anim_t += dt;
     particles_step(gm, dt);
+    ghosts_step(gm, dt);
+    if (gm->shake_left > 0) gm->shake_left -= dt;
     // pulses and alpha fades
     for (int i = 0; i < gm->npu;) {
         Pulse *pl = &gm->pu[i];
@@ -2305,7 +2502,7 @@ void game_update(Game *gm, float dt)
         c->g = c->fg + (c->tg - c->fg) * k;
         c->b = c->fb + (c->tb - c->fb) * k;
         c->a = c->fa + (c->ta - c->fa) * k;
-        if (k >= 1.0f) c->fading = 0;
+        if (k >= 1.0f) { c->fading = 0; c->player = c->next_player; }
     }
 
     if (gm->p.dead) {
@@ -2425,14 +2622,15 @@ static GdColorF chan_color_d(const Game *gm, int id, float *additive, int depth)
     const Channel *c = &gm->ch[id];
     *additive = (float)c->additive;
     GdColorF o = {c->r, c->g, c->b, c->a};
-    if (c->lbg) {   // a paler background, fading towards player colour 1 as the background gets dark
+    if (c->lbg) {   // a paler background; only a (nearly) black background hands over to player colour 1
         const Channel *bg = &gm->ch[CH_BG], *p1 = &gm->ch[CH_P1];
         float h, sat, val, r, gg, b;
         rgb_to_hsv(bg->r / 255.0f, bg->g / 255.0f, bg->b / 255.0f, &h, &sat, &val);
         hsv_to_rgb(h, fmaxf(sat - 0.2f, 0.0f), val, &r, &gg, &b);
-        o.r = r * 255.0f * val + p1->r * (1.0f - val);
-        o.g = gg * 255.0f * val + p1->g * (1.0f - val);
-        o.b = b * 255.0f * val + p1->b * (1.0f - val);
+        const float w = fmaxf(0.0f, 1.0f - val * 5.0f);
+        o.r = r * 255.0f * (1.0f - w) + p1->r * w;
+        o.g = gg * 255.0f * (1.0f - w) + p1->g * w;
+        o.b = b * 255.0f * (1.0f - w) + p1->b * w;
         return o;
     }
     if (depth < 6 && id != CH_P1 && id != CH_P2) {
@@ -2527,6 +2725,7 @@ static void draw_kid(Game *gm, Gfx *g, const Obj *o, const GdChild *k, const GdF
     if (!f) return;
     const float ppu = g->atlas.px_per_unit, scale = s * ppu;
     float pw = mainf ? mainf->srcw / ppu : o->clipw ? (float)o->clipw : 30.0f, ph = mainf ? mainf->srch / ppu : 30.0f;
+    if (k->pw > 0) { pw = k->pw; ph = k->ph; }
     float dx = (k->x - pw * 0.5f) * (o->sx < 0 ? -1.0f : 1.0f) * fabsf(o->sx);
     float dy = (k->y - ph * 0.5f) * (o->sy < 0 ? -1.0f : 1.0f) * fabsf(o->sy);
     float r = o->rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
@@ -2534,14 +2733,74 @@ static void draw_kid(Game *gm, Gfx *g, const Obj *o, const GdChild *k, const GdF
     float add;
     int ch = k->kind == 2 ? CH_BLACK : k->kind == 1 ? o->ch_detail : o->ch_main;
     GdColorF col = chan_color(gm, ch, &add);
-    if (k->kind != 2) obj_hsv(gm, k->kind == 1 ? o->hsv2 : o->hsv1, &col);
-    col.r *= k->r / 255.0f; col.g *= k->g / 255.0f; col.b *= k->b / 255.0f;
+    if (k->kind != 2) {   // the colours in the child table are only the editor's placeholders
+        obj_hsv(gm, k->kind == 1 ? o->hsv2 : o->hsv1, &col);
+        if (gm->npu) group_pulses(gm, o, &col, k->kind == 1 ? 2 : 1);
+    }
+    if (o->lighter) {   // highlight and shadow only brighten or darken what lies below them
+        if (k->kind == 1 && ch == CH_LIGHTER) { col = (GdColorF){255, 255, 255, 0.3f}; add = 0; }
+        else if (k->kind == 2) col.a *= 0.3f;
+    }
     col.a *= oa;
     gfx_frame(g, f, cx + wx * scale, cy - wy * scale, o->rot + k->rot,
               o->sx * k->sx * (k->flipx ? -1.0f : 1.0f) * s, o->sy * k->sy * (k->flipy ? -1.0f : 1.0f) * s, col, (int)add);
 }
 
 static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, float oa);
+
+static int beast_index(int id)
+{
+    return id == 918 ? AN_BEAST1 : id == 1327 ? AN_BEAST2 : id == 1328 ? AN_BEAST3
+         : id == 1584 ? AN_BEAST4 : id == 2012 ? AN_BEAST5 : -1;
+}
+
+// Animated monsters: parts in the object colour (black unless the level names one), white eyes,
+// a glow in the light background colour.
+static void draw_beast(Game *gm, Gfx *g, const Obj *o, int which, float cx, float cy, float s, float oa)
+{
+    const float near = o->x - gm->p.x;
+    const int bite = which == AN_BEAST1 && near > -40.0f && near < 260.0f && gm->anim[AN_BITE].nframes;
+    const Anim *a = &gm->anim[bite ? AN_BITE : which];
+    const int fr = (int)(gm->anim_t * (bite ? 20.0f : 12.0f) + o->x * 0.01f) % a->nframes;
+    const float unit = s * g->atlas.px_per_unit;
+    const float r = o->rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
+    const float turn = (o->sx < 0) != (o->sy < 0) ? -1.0f : 1.0f;
+    float add;
+    GdColorF lit = chan_color(gm, 1007, &add), body = {0, 0, 0, 1};
+    if (o->ch_main != CH_OBJ && o->ch_main != CH_BLACK) {
+        body = chan_color(gm, o->ch_main, &add);
+        lit = body;
+    }
+    lit.a *= oa;
+    body.a = oa;
+    const GdColorF white = {255, 255, 255, oa};
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < a->nparts[fr]; i++) {
+            const AnimPart *p = &a->part[fr][i];
+            // eyes are the small parts of the second and third monster and the last of the first
+            const int eye = ((which == AN_BEAST2 || which == AN_BEAST3) && p->z > 0) ||
+                            (which == AN_BEAST4 && p->f->srcw < 16) || (which == AN_BEAST5 && p->z > 1);
+            const float dx = p->x * o->sx, dy = p->y * o->sy;
+            const float x = cx + (dx * c + dy * sn) * unit, y = cy - (-dx * sn + dy * c) * unit;
+            const float rot = o->rot + p->rot * turn;
+            if (pass == 0) {
+                if (p->glow) gfx_frame(g, p->glow, x, y, rot, o->sx * p->sx * s, o->sy * p->sy * s, lit, 1);
+            } else {
+                gfx_frame(g, p->f, x, y, rot, o->sx * p->sx * s, o->sy * p->sy * s, eye ? white : body, 0);
+            }
+        }
+    if (which == AN_BEAST1) {   // its eye is not part of the animation: it sits on the upper jaw
+        const GdFrame *e = gfx_find(g, "GJBeast01_03_001.png");
+        const AnimPart *head = NULL;
+        for (int i = 0; i < a->nparts[fr]; i++)
+            if (!head || a->part[fr][i].z > head->z) head = &a->part[fr][i];
+        if (e && head) {
+            const float dx = (head->x - 4.0f) * o->sx, dy = (head->y + 9.0f) * o->sy;
+            gfx_frame(g, e, cx + (dx * c + dy * sn) * unit, cy - (-dx * sn + dy * c) * unit, o->rot,
+                      o->sx * s, o->sy * s, white, 0);
+        }
+    }
+}
 
 // Restricts the following sprites to the object's slope triangle (screen px, unit = px per unit).
 // The unrotated shape has its right angle at the bottom right.
@@ -2569,28 +2828,116 @@ static void draw_glow(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float 
 {
     float add, oa = 1.0f;
     for (int k = 0; k < o->ngrp; k++) oa *= gm->galpha[o->grp[k]];
-    GdColorF col = chan_color(gm, o->ch_main, &add);
-    if (o->ch_main == CH_BLACK) return;
+    // saw blades glow in the light background colour, everything else in its own colour
+    GdColorF col = chan_color(gm, o->spin != 0 ? 1007 : o->ch_main, &add);
+    if (o->ch_main == CH_BLACK && o->spin == 0) return;
     col.a *= oa;
-    gfx_frame(g, o->glow, cx, cy, o->rot, o->sx * s, o->sy * s, col, 1);
+    const float rot = o->rot + o->spin * gm->anim_t;
+    gfx_frame(g, o->glow, cx, cy, rot, o->sx * s, o->sy * s, col, 1);
+    if (o->kidset < 0 || !o->main) return;
+    // objects built from mirrored copies of one sprite mirror their glow the same way
+    const KidSet *ks = &gm->kidsets[o->kidset];
+    const float r = rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r), unit = s * g->atlas.px_per_unit;
+    for (int i = 0; i < ks->n; i++) {
+        const GdChild *k = &ks->c[i];
+        if (ks->f[i] != o->main || k->pw <= 0) continue;
+        const float dx = (k->x - k->pw * 0.5f) * o->sx, dy = (k->y - k->ph * 0.5f) * o->sy;
+        gfx_frame(g, o->glow, cx + (dx * c + dy * sn) * unit, cy - (-dx * sn + dy * c) * unit, rot + k->rot,
+                  o->sx * k->sx * (k->flipx ? -1.0f : 1.0f) * s, o->sy * k->sy * (k->flipy ? -1.0f : 1.0f) * s, col, 1);
+    }
+}
+
+// Small squares around orbs (drifting inwards) and above pads (rising), in their colour.
+static void draw_sparks(const Game *gm, Gfx *g, const Obj *o, float cx, float cy, float unit, float oa)
+{
+    float cr = 255, cg = 255, cb = 255;
+    switch (o->sub) {
+    case K_YELLOW: cr = 255; cg = 175; cb = 50; break;
+    case K_PINK: cr = 255; cg = 100; cb = 255; break;
+    case K_BLUE: cr = 60; cg = 220; cb = 255; break;
+    case K_GREEN: case K_DASH: cr = 80; cg = 255; cb = 90; break;
+    case K_RED: cr = 255; cg = 70; cb = 60; break;
+    case K_DASH_FLIP: cr = 255; cg = 90; cb = 220; break;
+    case K_SPIDER: cr = 170; cg = 80; cb = 255; break;
+    default: break;
+    }
+    const int pad = o->type == OT_PAD, n = 18;
+    const float r = o->rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
+    for (int i = 0; i < n; i++) {
+        const float life = gm->anim_t * (pad ? 1.9f : 1.6f) + (float)i / n + o->x * 0.0113f;
+        const float ph = life - floorf(life);
+        // a new place for every life of a spark
+        const float seed = sinf((floorf(life) * 7.31f + i * 12.9898f + o->x * 0.071f)) * 43758.5453f;
+        const float rnd = seed - floorf(seed);
+        float dx, dy;
+        if (pad) {
+            dx = (rnd - 0.5f) * 26.0f;
+            dy = (-2.0f + ph * (14.0f + 14.0f * rnd)) * (o->sy < 0 ? -1.0f : 1.0f);
+        } else {
+            const float ang = rnd * 6.2831853f, dist = 20.0f - 9.0f * ph;
+            dx = cosf(ang) * dist;
+            dy = sinf(ang) * dist;
+        }
+        const float size = (2.0f + 2.8f * rnd) * (1.0f - 0.5f * ph) * unit;
+        GdColorF col = {cr, cg, cb, oa * g->fade * fminf(1.0f, 1.25f * sinf(ph * 3.14159265f))};
+        float x = cx + (dx * c + dy * sn) * unit;
+        const float y = cy - (-dx * sn + dy * c) * unit;
+        gfx_glow_fill(g, (SDL_FRect){x - size * 0.5f, y - size * 0.5f, size, size}, col);
+    }
+}
+
+// The original sizes some decorations with the loudness of the song. There is no audio here, so a
+// steady 140 bpm beat stands in: 1 on the beat, dying away until the next one.
+static float music_pulse(const Game *gm)
+{
+    return expf(-4.0f * fmodf(gm->anim_t * (140.0f / 60.0f), 1.0f));
 }
 
 static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, int pass)
 {
     float add;
     float oa = 1.0f;
-    Obj spun;
-    if (o->spin != 0) {   // rotating saw blades
-        spun = *o;
-        spun.rot += o->spin * gm->anim_t;
-        o = &spun;
+    Obj shaped;
+    if (o->spin != 0 || o->beat) {   // rotating saw blades and decorations that jump with the music
+        shaped = *o;
+        shaped.rot += o->spin * gm->anim_t;
+        if (o->beat) {
+            const float k = o->beat == 1 ? 0.25f + 0.65f * music_pulse(gm) : 0.65f + 0.45f * music_pulse(gm);
+            shaped.sx *= k;
+            shaped.sy *= k;
+        }
+        o = &shaped;
     }
     for (int k = 0; k < o->ngrp; k++) oa *= gm->galpha[o->grp[k]];
     if (oa <= 0.003f) return;
+    if (gm->draw_under && (o->kidset < 0 || o->type == OT_PORTAL || (o->id >= 920 && o->id <= 925))) return;
+    const int beast = beast_index(o->id);
+    if (beast >= 0 && gm->anim && gm->anim[beast].nframes) {
+        draw_beast(gm, g, o, beast, cx, cy, s, oa);
+        return;
+    }
     GdColorF col = chan_color(gm, o->ch_main, &add);
+    if (o->id >= 920 && o->id <= 925) {   // fires cycle through their frames
+        for (int i = 0; i < gm->nloops; i++) {
+            if (gm->loops[i].id != o->id || o->kidset < 0 || o->clipw) continue;
+            const int fr = (int)(gm->anim_t * 14.0f + o->x * 0.07f) % gm->loops[i].n;
+            const KidSet *ks = &gm->kidsets[o->kidset];
+            const GdFrame *kf = gm->loops[i].kid[fr];
+            for (int k = 0; k < ks->n; k++)
+                if (ks->c[k].z < 0) draw_kid(gm, g, o, &ks->c[k], kf ? kf : ks->f[k], cx, cy, s, o->main, oa);
+            if (o->hsv1) obj_hsv(gm, o->hsv1, &col);
+            col.a *= oa;
+            gfx_frame(g, gm->loops[i].main[fr], cx, cy, o->rot, o->sx * s, o->sy * s, col, (int)add);
+            for (int k = 0; k < ks->n; k++)
+                if (ks->c[k].z >= 0) draw_kid(gm, g, o, &ks->c[k], kf ? kf : ks->f[k], cx, cy, s, o->main, oa);
+            return;
+        }
+    }
     if (o->hsv1) obj_hsv(gm, o->hsv1, &col);
     if (gm->npu) group_pulses(gm, o, &col, 1);
     col.a *= oa;
+    if (o->fill) add = 0;
+    if (o->faint && o->ch_main == CH_BLACK) col.a *= 0.3f;
     if (o->type == OT_PORTAL) {
         if (pass == 0 && o->back) gfx_frame(g, o->back, cx, cy, o->rot, o->sx * s, o->sy * s, col, 0);
         if (pass == 1 && o->main) gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s, o->sy * s, col, 0);
@@ -2599,7 +2946,13 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     }
     if (o->kidset >= 0) {
         const KidSet *ks = &gm->kidsets[o->kidset];
-        for (int k = 0; k < ks->n; k++) if (ks->c[k].z < 0) draw_kid(gm, g, o, &ks->c[k], ks->f[k], cx, cy, s, o->main, oa);
+        for (int k = 0; k < ks->n; k++) {
+            // the colour sprite of two-colour objects (not the parts of one-colour objects)
+            const int under = ks->c[k].z < 0 && ks->c[k].kind == 1 && o->two_colour;
+            if (ks->c[k].z < 0 && under == gm->draw_under)
+                draw_kid(gm, g, o, &ks->c[k], ks->f[k], cx, cy, s, o->main, oa);
+        }
+        if (gm->draw_under) return;
         if (o->main) gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s, o->sy * s, col, (int)add);
         for (int k = 0; k < ks->n; k++) {
             if (ks->c[k].z < 0) continue;
@@ -2615,7 +2968,7 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     if (o->ball && o->main) {   // the original pulses it with the music; here it breathes gently
         const float ppu = g->atlas.px_per_unit, up = (o->main->srch / ppu * 0.5f + 10.0f) * o->sy * s * ppu;
         const float r = o->rot * 3.14159265f / 180.0f;
-        const float size = 0.42f + 0.08f * sinf(gm->anim_t * 7.0f);
+        const float size = 0.25f + 0.65f * music_pulse(gm);
         float badd;
         GdColorF bc = chan_color(gm, CH_P1, &badd);
         bc.a = oa;
@@ -2631,6 +2984,7 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
             gfx_frame(g, o->main, cx, cy, o->rot, o->sx * s * grow, o->sy * s * (orb ? grow : 1.0f + 0.9f * ph), pc, 1);
         }
     }
+    if (o->type == OT_ORB || o->type == OT_PAD) draw_sparks(gm, g, o, cx, cy, s * g->atlas.px_per_unit, oa);
     if (o->detail) {
         GdColorF dc = chan_color(gm, o->ch_detail, &add);
         if (o->hsv2) obj_hsv(gm, o->hsv2, &dc);
@@ -2640,37 +2994,37 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     }
 }
 
-// Animated portal decoration: swirl sprites that pulse and slide, plus dots drawn into the portal.
+// the tab on the exit side of a portal with the symbol of the form (the symbol stays upright)
+static void draw_portal_tab(const Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s)
+{
+    GdColorF w = {255, 255, 255, 1};
+    for (int k = 0; k < o->ngrp; k++) w.a *= gm->galpha[o->grp[k]];
+    const float r = o->rot * 3.14159265f / 180.0f, off = 17.4f * (o->sx < 0 ? -1.0f : 1.0f) * s * g->atlas.px_per_unit;
+    const float x = cx + cosf(r) * off, y = cy + sinf(r) * off;
+    gfx_frame(g, o->fx1, x, y, o->rot, o->sx * s, o->sy * s, w, 0);
+    if (o->fx2) gfx_frame(g, o->fx2, x, y, 0, fabsf(o->sx) * s, fabsf(o->sy) * s, w, 0);
+}
+
+// Portal decoration: dots drawn into the portal.
 static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s, float oa)
 {
     float pr, pg, pb;
     portal_rgb(o->sub, &pr, &pg, &pb);
+    if (o->id == 749) { pr = 255; pg = 160; pb = 20; }
     GdColorF c = {pr, pg, pb, oa};
     const float t = gm->anim_t, ppu = g->atlas.px_per_unit, w2s = s * ppu;
     const float flip = o->sx < 0 ? -1.0f : 1.0f;
-    if (o->fx1) {
-        float ph = fmodf(t * 0.9f + o->y * 0.01f, 1.0f);
-        GdColorF a = c;
-        a.a *= sinf(ph * 3.14159265f);
-        gfx_frame(g, o->fx1, cx, cy, o->rot, o->sx * s * (1.15f - 0.3f * ph), o->sy * s, a, 1);
-    }
-    if (o->fx2) {
-        float ph = fmodf(t * 0.9f + 0.5f + o->y * 0.01f, 1.0f);
-        GdColorF a = c;
-        a.a *= sinf(ph * 3.14159265f);
-        gfx_frame(g, o->fx2, cx + flip * (ph - 0.5f) * 10.0f * w2s, cy, o->rot, o->sx * s * (0.9f + 0.2f * ph), o->sy * s, a, 1);
-    }
     // dots drifting into the portal
     const float hh = o->hh > 8 ? o->hh : 30.0f;
-    for (int i = 0; i < 6; i++) {
-        float ph = fmodf(t * 0.8f + i / 6.0f + o->x * 0.0071f, 1.0f);
+    for (int i = 0; i < 10; i++) {
+        float ph = fmodf(t * 0.8f + i / 10.0f + o->x * 0.0071f, 1.0f);
         float ang = i * 2.399f + o->x * 0.37f;
         float r = 1.0f - ph;
         float dx = cosf(ang) * 34.0f * r * flip, dy = sinf(ang) * hh * r;
         float sz = 5.0f * (0.5f + 0.5f * r) * w2s;
         GdColorF d = c;
         d.a *= sinf(ph * 3.14159265f);
-        gfx_fill(g, (SDL_FRect){cx + dx * w2s - sz / 2, cy - dy * w2s - sz / 2, sz, sz}, d);
+        gfx_glow_fill(g, (SDL_FRect){cx + dx * w2s - sz / 2, cy - dy * w2s - sz / 2, sz, sz}, d);
     }
 }
 
@@ -2687,6 +3041,32 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
     const GdFrame *cube2 = gm->fr_cube2 ? gm->fr_cube2 : gfx_find(g, "player_01_2_001.png");
     const float up = 5.0f * scale * mini * flip; // the little cube sits 5 units above the vehicle centre
     rot += atan2f((float)gm->frame.ux, (float)gm->frame.uy) * 180.0f / 3.14159265f;   // turned gameplay
+    if ((p->mode == M_ROBOT || p->mode == M_SPIDER) && gm->anim) {
+        const int robot = p->mode == M_ROBOT;
+        const int which = p->on_ground ? (robot ? AN_ROBOT_RUN : AN_SPIDER_RUN)
+                        : !robot ? AN_SPIDER_FALL : p->rising ? AN_ROBOT_JUMP : AN_ROBOT_FALL;
+        const Anim *a = &gm->anim[which];
+        if (a->nframes) {
+            const int fr = (int)(gm->anim_t * (robot ? 28.0f : 20.0f)) % a->nframes;
+            const float unit = scale * mini;
+            const float r = rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
+            for (int i = 0; i < a->nparts[fr]; i++) {
+                const AnimPart *q = &a->part[fr][i];
+                const float dx = q->x, dy = q->y * flip;
+                const float x = px + (dx * c + dy * sn) * unit, y = py - (-dx * sn + dy * c) * unit;
+                const float shade = q->z < (robot ? 3 : 2) ? 0.55f : 1.0f;   // limbs on the far side
+                GdColorF m = c1, d = c2, w = {255, 255, 255, 1};
+                m.r *= shade; m.g *= shade; m.b *= shade;
+                d.r *= shade; d.g *= shade; d.b *= shade;
+                w.r *= shade; w.g *= shade; w.b *= shade;
+                const float qr = rot + q->rot * flip, qx = q->sx * k, qy = q->sy * k * flip;
+                if (q->f2) gfx_frame(g, q->f2, x, y, qr, qx, qy, d, 0);
+                gfx_frame(g, q->f, x, y, qr, qx, qy, m, 0);
+                if (q->extra) gfx_frame(g, q->extra, x, y, qr, qx, qy, w, 0);
+            }
+            return;
+        }
+    }
     switch (p->mode) {
     case M_SWING: {
         const GdFrame *a1 = gm->fr_swing ? gm->fr_swing : gm->fr_ship, *a2 = gm->fr_swing ? gm->fr_swing2 : gm->fr_ship2;
@@ -2768,33 +3148,87 @@ static void draw_trail(Game *gm, Gfx *g, const Player *p, float scale, int swap)
 
 // Enter / exit transition at the screen edges (enter effect triggers). Returns 0..1 visibility and
 // adjusts position (screen px) and scale of a temporary copy of the object.
-static float edge_effect(const Game *gm, Obj *o, float vw, float scale, float *cx, float *cy)
+static float edge_effect(const Game *gm, const Gfx *g, Obj *o, float vw, float scale, float *cx, float *cy)
 {
     if (gm->enter_fx == 1915) return 1.0f;
+    const int no_fade = o->no_fade || (o->solid_fill && (gm->enter_fx == 0 || gm->enter_fx == 22));
+    if (no_fade && o->no_enter) return 1.0f;
     const float x = o->x - gm->cam_x;
     float t = fminf(x, vw - x) / 70.0f;
     if (t >= 1.0f) return 1.0f;
     if (t < 0.0f) t = 0.0f;
     const float off = (1.0f - t) * 100.0f * scale;
-    switch (gm->enter_fx) {
+    switch (o->no_enter ? 0 : gm->enter_fx) {
     case 23: *cy += off; break;
     case 24: *cy -= off; break;
     case 25: *cx -= off; break;
     case 26: *cx += off; break;
     case 27: o->sx *= t; o->sy *= t; break;
     case 28: o->sx *= 1.0f + 0.75f * (1.0f - t); o->sy *= 1.0f + 0.75f * (1.0f - t); break;
+    case 58: *cy += *cy < g->h * 0.5f ? -off : off; break;   // the two halves of the screen drift apart
+    case 59: *cy += *cy < g->h * 0.5f ? off : -off; break;   // ... or come together
     default: break;
     }
-    return t;
+    return no_fade ? 1.0f : t;
+}
+
+// Invisible blocks and spikes show clearly at the screen edges and almost vanish around the icon.
+static float invisible_alpha(const Game *gm, const Obj *o)
+{
+    if (!o->invisible) return 1.0f;
+    const float d = fabsf(o->x - (gm->p.x + 40.0f));
+    return 0.05f + 0.75f * fminf(fmaxf((d - 70.0f) / 130.0f, 0.0f), 1.0f);
 }
 
 static void draw_obj_fx(Game *gm, Gfx *g, const Obj *o, float vw, float scale, float cx, float cy, float s, int pass)
 {
     if (o->type == OT_PORTAL) { draw_obj_layer(gm, g, o, cx, cy, s, pass); return; }
     Obj e = *o;
-    g->fade = edge_effect(gm, &e, vw, scale, &cx, &cy);
+    g->fade = edge_effect(gm, g, &e, vw, scale, &cx, &cy) * invisible_alpha(gm, o);
     draw_obj_layer(gm, g, &e, cx, cy, s, pass);
     g->fade = 1;
+}
+
+// The ground darkens towards both screen edges. `edge` is the screen y of the ground line;
+// `ceiling` draws the upside-down version.
+static void ground_shade(Gfx *g, float ox, float edge, float W, float scale, int ceiling)
+{
+    const GdFrame *f = gfx_find(g, "groundSquareShadow_001.png");
+    if (!f) return;
+    const float ppu = g->atlas.px_per_unit, kx = 0.7f * scale / ppu, ky = scale / ppu;
+    const float hw = f->srcw * kx * 0.5f, hh = f->srch * ky * 0.5f;
+    const float y = ceiling ? edge - hh : edge + hh;
+    const GdColorF c = {255, 255, 255, 100.0f / 255.0f};
+    gfx_frame(g, f, ox + hw - scale, y, 0, kx, ceiling ? -ky : ky, c, 0);
+    gfx_frame(g, f, ox + W - hw + scale, y, 0, -kx, ceiling ? -ky : ky, c, 0);
+}
+
+// what the object passes need to know about the picture
+typedef struct { float left, right, vw, vh, scale, ox, oy, s; } View;
+
+static int in_view(const View *v, const Obj *o)
+{
+    return !(o->type == OT_TRIGGER || o->off || o->nodraw || o->x < v->left || o->x > v->right);
+}
+
+// Objects in draw order: pass 0 the layers behind the icon (and the back halves of portals), pass 1
+// those in front of it. Within one layer all colour sprites that lie below come first.
+static void draw_layers(Game *gm, Gfx *g, const View *v, int front)
+{
+    for (int k = 0, end; k < gm->n; k = end) {
+        const int layer = gm->obj[gm->by_z[k]].zlayer;
+        for (end = k + 1; end < gm->n && gm->obj[gm->by_z[end]].zlayer == layer; end++) {}
+        for (gm->draw_under = 1; gm->draw_under >= 0; gm->draw_under--)
+            for (int j = k; j < end; j++) {
+                const Obj *o = &gm->obj[gm->by_z[j]];
+                if (!in_view(v, o)) continue;
+                const float x = v->ox + (o->x - gm->cam_x) * v->scale;
+                const float y = v->oy + (v->vh - (o->y - gm->cam_bottom)) * v->scale;
+                if (o->type == OT_PORTAL) draw_obj_layer(gm, g, o, x, y, v->s, front);
+                else if ((o->zlayer >= 5) == front) draw_obj_fx(gm, g, o, v->vw, v->scale, x, y, v->s, 0);
+            }
+    }
+    gm->draw_under = 0;
 }
 
 void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, float oy,
@@ -2816,6 +3250,17 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     if (gm->time < 0.02f) gm->mir_x = target;
     gm->mir_x += (target - gm->mir_x) * 0.06f;
     gm->cam_x = ix - (gm->mirror ? vw - gm->mir_x : gm->mir_x);
+    // at the start the camera waits until the icon has reached its place
+    if (!gm->mirror && gm->frame.fx > 0 && gm->cam_x < 0) gm->cam_x = 0;
+    float shake_x = 0, shake_y = 0;
+    if (gm->shake_left > 0) {
+        const float every = gm->shake_every > 0.001f ? gm->shake_every : 1.0f / 60.0f;
+        const float jolt = floorf(gm->anim_t / every);
+        shake_x = sinf(jolt * 91.7f) * gm->shake_amp;
+        shake_y = sinf(jolt * 47.3f + 2.0f) * gm->shake_amp;
+        gm->cam_x += shake_x;
+        gm->cam_bottom += shake_y;
+    }
     g_ox = ox; g_oy = oy; g_vh = vh; g_scale = scale;
     SDL_Rect clip = {(int)ox, (int)oy, (int)W, (int)H};
     gfx_set_clip(g, &clip);
@@ -2827,13 +3272,13 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     bgc.a = 1;
     gfx_fill(g, (SDL_FRect){ox, oy, W, H}, bgc);
     if (bg && bg->tex) {
-        float tile = vh * 1.709f * scale;         // as in the original: much taller than the view, bottom aligned
-        float step = tile;
-        float off = fmodf(gm->cam_x * 0.1f * scale, step);
+        // as in the original: much taller than the view (1024 / 1.875 units), bottom aligned
+        const float step = 1024.0f / 1.875f * scale;
+        float off = fmodf((gm->cam_x * 0.1f - 1.6f) * scale, step);
         if (off < 0) off += step;
         for (float x = -off; x < W; x += step) {
             gfx_image_rect(g, bg, (SDL_FRect){0, 0, (float)bg->w, (float)bg->h},
-                           (SDL_FRect){ox + x, oy + H - tile, step, tile}, bgc);
+                           (SDL_FRect){ox + x, oy + H - step + 0.4f * scale, step, step}, bgc);
         }
     }
 
@@ -2848,17 +3293,28 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
         if (!o->glow || o->off || o->nodraw || o->x < view_l || o->x > view_r) continue;
         Obj e = *o;
         float ex = SX(o->x), ey = SY(o->y);
-        g->fade = edge_effect(gm, &e, vw, scale, &ex, &ey);
+        g->fade = edge_effect(gm, g, &e, vw, scale, &ex, &ey) * invisible_alpha(gm, o);
         draw_glow(gm, g, &e, ex, ey, s);
         g->fade = 1;
     }
 
+    const View v = {view_l, view_r, vw, vh, scale, ox, oy, s};
+
     // pass 0: back layers
-    for (int k = 0; k < gm->n; k++) {
-        const Obj *o = &gm->obj[gm->by_z[k]];
-        if (o->type == OT_TRIGGER || o->off || o->nodraw || o->x < view_l || o->x > view_r) continue;
-        if (o->zlayer >= 5 && o->type != OT_PORTAL) continue;
-        draw_obj_fx(gm, g, o, vw, scale, SX(o->x), SY(o->y), s, 0);
+    draw_layers(gm, g, &v, 0);
+
+    // images of the ghost trail, behind the icon and shrinking as they fade
+    for (int i = 0; i < GD_GHOSTS; i++) {
+        const Ghost *q = &gm->ghost[i];
+        if (q->age <= 0) continue;
+        // the main layer of the form, in the first colour, added onto the picture
+        const GdFrame *f = q->mode == M_SHIP ? gm->fr_ship : q->mode == M_BALL ? gm->fr_ball : q->mode == M_UFO ? gm->fr_ufo
+                         : q->mode == M_WAVE ? gm->fr_dart : q->mode == M_SWING ? gm->fr_swing : gm->fr_cube;
+        if (!f) continue;
+        const float left = 1.0f - q->age / 0.4f, k = s * (q->mini ? 0.6f : 1.0f) * (0.6f + 0.4f * left);
+        GdColorF c = chan_color(gm, CH_P1, &add);
+        c.a = 0.75f * left;
+        gfx_frame(g, f, SX(q->x), SY(q->y), q->rot, k, k * q->grav, c, 1);
     }
 
     // player
@@ -2889,6 +3345,11 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
             float k = p->life / p->max;
             GdColorF pc = {p->r, p->g, p->b, p->a * k};
             float sz = p->size * scale;
+            if (p->square) {
+                pc.a = p->a * fminf(1.0f, k * 1.8f);
+                gfx_glow_fill(g, (SDL_FRect){SX(p->x) - sz / 2, SY(p->y) - sz / 2, sz, sz}, pc);
+                continue;
+            }
             const GdFrame *use = p->grow > 100.0f && pring ? pring : pf;   // fast-growing = shock ring
             if (use) {
                 float f = sz / (float)(use->srcw > 0 ? use->srcw : use->w);
@@ -2900,20 +3361,20 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     }
 
     // pass 1: front layers and portal fronts
+    draw_layers(gm, g, &v, 1);
+    // the tabs lie above all portals (overlapping ones would hide them otherwise)
     for (int k = 0; k < gm->n; k++) {
         const Obj *o = &gm->obj[gm->by_z[k]];
-        if (o->type == OT_TRIGGER || o->off || o->nodraw || o->x < view_l || o->x > view_r) continue;
-        if (o->type == OT_PORTAL) draw_obj_layer(gm, g, o, SX(o->x), SY(o->y), s, 1);
-        else if (o->zlayer >= 5) draw_obj_fx(gm, g, o, vw, scale, SX(o->x), SY(o->y), s, 0);
+        if (o->type == OT_PORTAL && o->fx1 && in_view(&v, o)) draw_portal_tab(gm, g, o, SX(o->x), SY(o->y), s);
     }
     // ground and ceiling cover whatever reaches into them (fixed tile size: it must not stretch
     // with the camera height)
     GdColorF gc = chan_color(gm, CH_GROUND, &add);
     gc.a = 1;
     float tile = (ground && ground->tex) ? ground->w / ppu * scale : 128.0f * scale;
-    float gy = SY(gm->ground_y);
+    float gy = SY(gm->ground_y + 0.6f);       // the ground reaches slightly above the physics floor
     if (gy < oy + H) {
-        float off = fmodf(gm->cam_x * scale, tile);
+        float off = fmodf((gm->cam_x - 15.0f) * scale, tile);   // tiles start half a block in
         if (off < 0) off += tile;
         if (ground && ground->tex) {
             for (float y = gy; y < oy + H; y += tile)
@@ -2923,6 +3384,15 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
         } else {
             gfx_fill(g, (SDL_FRect){ox, gy, W, oy + H - gy}, gc);
         }
+        const GfxImage *g2 = gm->ground2;
+        if (g2 && g2->tex) {
+            GdColorF c2 = chan_color(gm, CH_GROUND2, &add);
+            c2.a = 1;
+            for (float x = -off; x < W; x += tile)
+                gfx_image_rect(g, g2, (SDL_FRect){0, 0, (float)g2->w, (float)g2->h},
+                               (SDL_FRect){ox + x, gy, tile, tile * g2->h / g2->w}, c2);
+        }
+        ground_shade(g, ox, gy, W, scale, 0);
         const GdFrame *line = gfx_find(g, "floorLine_01_001.png");
         if (line) {
             GdColorF lc = chan_color(gm, CH_LINE, &add);
@@ -2930,9 +3400,9 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
         }
     }
     if (gm->has_ceil) {
-        float cy = SY(gm->ceil_y);
+        float cy = SY(gm->ceil_y - 0.6f);
         if (cy > oy) {
-            float off = fmodf(gm->cam_x * scale, tile);
+            float off = fmodf((gm->cam_x - 15.0f) * scale, tile);
             if (off < 0) off += tile;
             if (ground && ground->tex) {
                 for (float y = cy; y > oy - tile; y -= tile)
@@ -2942,6 +3412,15 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
             } else {
                 gfx_fill(g, (SDL_FRect){ox, oy, W, cy - oy}, gc);
             }
+            const GfxImage *g2 = gm->ground2;
+            if (g2 && g2->tex) {
+                GdColorF c2 = chan_color(gm, CH_GROUND2, &add);
+                c2.a = 1;
+                for (float x = -off; x < W; x += tile)
+                    gfx_image_rect(g, g2, (SDL_FRect){0, (float)g2->h, (float)g2->w, -(float)g2->h},
+                                   (SDL_FRect){ox + x, cy - tile * g2->h / g2->w, tile, tile * g2->h / g2->w}, c2);
+            }
+            ground_shade(g, ox, cy, W, scale, 1);
             const GdFrame *line = gfx_find(g, "floorLine_01_001.png");
             if (line) {
                 GdColorF lc = chan_color(gm, CH_LINE, &add);
@@ -2952,6 +3431,8 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
 
     #undef SX
     #undef SY
+    gm->cam_x -= shake_x;
+    gm->cam_bottom -= shake_y;
     g->mirror = 0;
     gfx_set_clip(g, NULL);
 }

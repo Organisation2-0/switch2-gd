@@ -21,8 +21,9 @@ typedef struct {
     int flipy;    // key 5
     float scale;  // key 32, default 1
     float scale_x, scale_y;     // keys 128 / 129 (2.2), 0 = use scale
-    signed char has_hsv1, has_hsv2;
+    signed char has_hsv1, has_hsv2, has_copy_hsv;
     float hsv1[5], hsv2[5];     // per-object colour shift of the base / detail colour (keys 41-44)
+    float copy_hsv[5];          // colour triggers: shift of a copied channel (key 49)
     int ngroups;                // key 57, "a.b.c"
     int groups[GD_MAX_GROUPS];
     short list[16];             // key 152 (random weights) or 435 (sequence): "group.number" pairs

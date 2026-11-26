@@ -7,6 +7,7 @@
 
 static SDL_Renderer *s_r;
 static int s_w, s_h;
+static SDL_BlendMode s_blend; // premultiplied alpha
 
 int gfxb_init(Gfx *g, int w, int h, int fullscreen)
 {
@@ -19,6 +20,9 @@ int gfxb_init(Gfx *g, int w, int h, int fullscreen)
     s_r = SDL_CreateRenderer(g->win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!s_r) s_r = SDL_CreateRenderer(g->win, -1, 0);
     if (!s_r) return -3;
+    s_blend = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                         SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    if (SDL_SetRenderDrawBlendMode(s_r, s_blend) != 0) return -3;
     s_w = w;
     s_h = h;
     return 0;
@@ -35,7 +39,7 @@ GfxTex *gfxb_tex_create(const unsigned char *rgba, int w, int h)
     SDL_Texture *t = SDL_CreateTexture(s_r, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h);
     if (!t) return NULL;
     SDL_UpdateTexture(t, NULL, rgba, w * 4);
-    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureBlendMode(t, s_blend);
     SDL_SetTextureScaleMode(t, SDL_ScaleModeLinear);
     return (GfxTex *)t;
 }
@@ -52,7 +56,7 @@ void gfxb_quad(GfxTex *tex, const SDL_FPoint pos[4], const SDL_FPoint uv[4], con
         v[i].tex_coord = uv[i];
     }
     static const int idx[6] = {0, 1, 2, 0, 2, 3};
-    SDL_BlendMode mode = additive ? SDL_BLENDMODE_ADD : SDL_BLENDMODE_BLEND;
+    SDL_BlendMode mode = additive ? SDL_BLENDMODE_ADD : s_blend;
     if (tex) SDL_SetTextureBlendMode((SDL_Texture *)tex, mode);
     else SDL_SetRenderDrawBlendMode(s_r, mode);
     SDL_RenderGeometry(s_r, (SDL_Texture *)tex, v, 4, idx, 6);

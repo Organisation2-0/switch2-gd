@@ -17,6 +17,7 @@ typedef struct {
     int icon_cube;    // player_NN
     int icon_ship;    // ship_NN
     int col1, col2;   // palette indices
+    char name[24];    // shown under the profile button of the title screen
 } Config;
 
 extern const char *const g_action_names[ACT_COUNT];

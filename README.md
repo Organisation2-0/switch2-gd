@@ -5,20 +5,21 @@ homebrew (libounce / kaiHEN) and for Windows. It contains **no game assets**: it
 sprites, fonts and levels from **your own copy** of Geometry Dash (Steam).
 
 > Not affiliated with RobTop Games. You need a legal copy of Geometry Dash.
-> Version **1.0.3** is a hobby-grade release, see *Known issues* below.
+> Version **1.1.0** is a hobby-grade release, see *Known issues* below.
 
 ## Features
 
 - Loads the 22 official levels (`Resources/levels/N.txt`) and exported `.gdlvl` files.
-- Sprite atlases (10 sheets, incl. fire / pixel / particle sheets), original bitmap font,
-  GD-style menus (title, level select, pause, level complete).
+- Sprite atlases (10 sheets, incl. fire / pixel / particle sheets), original bitmap fonts;
+  title, level select and pause screen laid out like the original, plus a level complete screen.
 - Game modes: cube, ship, ball, UFO, wave, robot, spider, swing, mini size, gravity / speed
   portals, dual mode and the mirror portal.
 - Pads and orbs (yellow, pink, blue, green, red, black, dash), spikes, saws, blocks,
   breakable bricks, slopes, teleport portals.
 - Colour channels (copy, HSV, player colours, light background, per-object default channels),
-  multi-sprite objects (child sprites), glow, enter effects; **colour / pulse / move / rotate /
-  stop / toggle / alpha / spawn** triggers with groups.
+  multi-sprite objects (child sprites), blending like the original (premultiplied alpha), glow,
+  enter effects, rotating decorations, monsters, portal symbol tabs, ghost trail, camera shake;
+  **colour / pulse / move / rotate / stop / toggle / alpha / spawn** triggers with groups.
 - 2.2 gameplay: rotated and reversed gameplay (with trigger channels), free mode, spider /
   toggle / teleport orbs, teleport portals and trigger (exit gravity and force), force blocks,
   H blocks, passable blocks, time warp, gravity, follow and end triggers, pickup / count /
@@ -31,10 +32,11 @@ sprites, fonts and levels from **your own copy** of Geometry Dash (Steam).
 
 ## Test status
 
-1.0.3: the test bot completes **all 22 official levels without a skipped stretch** (Windows
-build, headless). Levels 12, 16, 19 and 22 need retries from checkpoints. The new logic
-triggers were checked with small purpose-built levels. The Switch build compiles but the
-changes of this version have not been tried on the console.
+1.1.0: the test bot completes **all 22 official levels without a skipped stretch** (Windows
+build, headless). Levels 12, 16, 19 and 22 need retries from checkpoints. The look of levels
+1-21 and of the title, level select and pause screens was compared with recordings of the
+original on spot samples. The Switch build compiles but this version has not been tried on the
+console. `prepare-sd.ps1` copies more files than in 1.0.x, so run it again when updating.
 
 ## Known issues / not implemented
 
@@ -45,10 +47,14 @@ changes of this version have not been tried on the console.
   impossible to finish.
 - Some 2.2 rules were derived from the level data of Dash and not confirmed against the
   original game (teleport exit gravity and force, trigger channels, launch ramps).
-- **Not implemented:** animated monsters, text objects, real robot / spider animations (drawn
-  as cube), **audio**.
-- Decorations that pulse with the music (rod balls, stars) differ in size from the original.
+- **Not implemented:** text objects, practice mode, orb counters and collected coins in the
+  menus, the monster attack animations except the first monster's bite, **audio**. The volume
+  sliders, social buttons and several menu buttons are drawn but do nothing.
+- Decorations that pulse with the music (rod balls, orbs, circles) follow a steady beat instead.
+- The garage and the key settings screens do not look like the original.
+- The look was compared with recordings of levels 1-21; level 22 (Dash) still differs clearly.
 - Physics follow OpenGD plus own additions; they are not identical to the original game.
+- The title screen shows `name=` from the config file (default "Player").
 - **Switch 2:** memory use is about 85 MB for the sprite sheets. If the app fails to start,
   check `sdmc:/switch/gd/log.txt` (it also records the frame rate) and open an issue.
 
@@ -73,7 +79,8 @@ then `make`. A prebuilt `gd-switch2.nro` is attached to the release.
    `switch\gd\Resources`.
 2. Start kaiHEN, open hbmenu (hold R while launching a game), run *Geometry Dash (fan port)*.
 
-Controls: A / X / Y jump, B or + pause, D-pad / L / R choose a level.
+Controls: A / X / Y jump, B or + pause, D-pad / L / R choose a level. On the title screen X opens
+the garage and Y the key settings (PC: G and O).
 
 ## Layout
 

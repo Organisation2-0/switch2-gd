@@ -10,6 +10,30 @@
 #include "../vendor/stb_image.h"
 #include "gfx_backend.h"
 
+// Colours reach the backends premultiplied, like the textures. This is how the original blends:
+// additive sprites therefore count their opacity twice (once in the colour, once in the blend).
+static SDL_Color col(GdColorF c)
+{
+    const float a = fminf(fmaxf(c.a, 0), 1);
+    SDL_Color o;
+    o.r = (Uint8)(fminf(fmaxf(c.r, 0), 255) * a + 0.5f);
+    o.g = (Uint8)(fminf(fmaxf(c.g, 0), 255) * a + 0.5f);
+    o.b = (Uint8)(fminf(fmaxf(c.b, 0), 255) * a + 0.5f);
+    o.a = (Uint8)(a * 255 + 0.5f);
+    return o;
+}
+
+static void premultiply(unsigned char *px, int w, int h)
+{
+    for (size_t i = 0, n = (size_t)w * h; i < n; i++, px += 4) {
+        const unsigned a = px[3];
+        if (a == 255) continue;
+        px[0] = (unsigned char)((px[0] * a + 127) / 255);
+        px[1] = (unsigned char)((px[1] * a + 127) / 255);
+        px[2] = (unsigned char)((px[2] * a + 127) / 255);
+    }
+}
+
 int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
 {
     memset(g, 0, sizeof *g);
@@ -29,6 +53,7 @@ int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
                                          "GJ_LaunchSheet", "FireSheet_01", "PixelSheet_01", "GJ_ParticleSheet"};
     if (gd_atlas_load(&g->atlas, resdir, g->suffix, sheets, 10)) return -4;
     for (int i = 0; i < g->atlas.nsheets; i++) {
+        premultiply(g->atlas.sheets[i].rgba, g->atlas.sheets[i].w, g->atlas.sheets[i].h);
         g->sheet_tex[i] = gfxb_tex_create(g->atlas.sheets[i].rgba, g->atlas.sheets[i].w,
                                           g->atlas.sheets[i].h);
         if (!g->sheet_tex[i]) return -5;
@@ -73,6 +98,7 @@ int gfx_load_image(Gfx *g, const char *file, GfxImage *out)
     int w, h, n;
     unsigned char *px = stbi_load(path, &w, &h, &n, 4);
     if (!px) return -1;
+    premultiply(px, w, h);
     out->tex = gfxb_tex_create(px, w, h);
     out->w = w;
     out->h = h;
@@ -87,16 +113,6 @@ void gfx_free_image(GfxImage *im)
 }
 
 const GdFrame *gfx_find(Gfx *g, const char *name) { return gd_atlas_find(&g->atlas, name); }
-
-static SDL_Color col(GdColorF c)
-{
-    SDL_Color o;
-    o.r = (Uint8)fminf(fmaxf(c.r, 0), 255);
-    o.g = (Uint8)fminf(fmaxf(c.g, 0), 255);
-    o.b = (Uint8)fminf(fmaxf(c.b, 0), 255);
-    o.a = (Uint8)(fminf(fmaxf(c.a, 0), 1) * 255);
-    return o;
-}
 
 static void quad(Gfx *g, GfxTex *tex, const float px[4], const float py[4],
                  const float u[4], const float v[4], SDL_Color c, int additive)
@@ -185,13 +201,17 @@ void gfx_ninepatch(Gfx *g, const GfxImage *im, float b, SDL_FRect d, float bd, G
         }
 }
 
-void gfx_fill(Gfx *g, SDL_FRect rc, GdColorF c)
+static void fill(Gfx *g, SDL_FRect rc, GdColorF c, int additive)
 {
     float px[4] = {rc.x, rc.x + rc.w, rc.x + rc.w, rc.x};
     float py[4] = {rc.y, rc.y, rc.y + rc.h, rc.y + rc.h};
     static const float zero[4] = {0, 0, 0, 0};
-    quad(g, NULL, px, py, zero, zero, col(c), 0);
+    quad(g, NULL, px, py, zero, zero, col(c), additive);
 }
+
+void gfx_fill(Gfx *g, SDL_FRect rc, GdColorF c) { fill(g, rc, c, 0); }
+
+void gfx_glow_fill(Gfx *g, SDL_FRect rc, GdColorF c) { fill(g, rc, c, 1); }
 
 void gfx_gradient_v(Gfx *g, SDL_FRect rc, GdColorF top, GdColorF bottom)
 {

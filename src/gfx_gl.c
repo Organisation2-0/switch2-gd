@@ -184,7 +184,7 @@ static void flush(void)
     if (!s_nquads) return;
     glBindTexture(GL_TEXTURE_2D, s_tex);
     if (s_additive) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
-    else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    else glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // premultiplied
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(s_nquads * 4 * sizeof(Vertex)), s_vtx, GL_STREAM_DRAW);
     glDrawElements(GL_TRIANGLES, s_nquads * 6, GL_UNSIGNED_SHORT, 0);
     s_nquads = 0;
