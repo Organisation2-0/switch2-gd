@@ -20,6 +20,7 @@ typedef struct {
     Binding bind[ACT_COUNT];
     int icon[IC_COUNT];   // numbers of the chosen icons
     int col1, col2;   // palette indices
+    int music, sfx;   // volume of music and sound effects, 0..100 (both 0: no sound device)
     char name[24];    // shown under the profile button of the title screen
 } Config;
 

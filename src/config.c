@@ -41,6 +41,7 @@ void config_defaults(Config *c)
     for (int i = 0; i < IC_COUNT; i++) c->icon[i] = 1;
     c->col1 = palette_nearest(125, 255, 0);
     c->col2 = palette_nearest(0, 255, 255);
+    c->music = c->sfx = 100;
     snprintf(c->name, sizeof c->name, "Player");
 }
 
@@ -55,6 +56,7 @@ int config_save(const Config *c, const char *path)
         fprintf(f, "color%d=%02X%02X%02X\n", i + 1, (int)rgb[0], (int)rgb[1], (int)rgb[2]);
     }
     fprintf(f, "name=%s\n", c->name);
+    fprintf(f, "music=%d\nsfx=%d\n", c->music, c->sfx);
     for (int i = 0; i < ACT_COUNT; i++)
         fprintf(f, "bind_%d=%d,%d,%d,%d\n", i, c->bind[i].key[0], c->bind[i].key[1], c->bind[i].joy[0],
                 c->bind[i].joy[1]);
@@ -87,6 +89,8 @@ int config_load(Config *c, const char *path)
             const int n = palette_nearest((int)(rgbx >> 16) & 255, (int)(rgbx >> 8) & 255, (int)rgbx & 255);
             if (idx == 1) c->col1 = n; else c->col2 = n;
         }
+        else if (sscanf(line, "sfx=%d", &v[0]) == 1) c->sfx = v[0] < 0 ? 0 : v[0] > 100 ? 100 : v[0];
+        else if (sscanf(line, "music=%d", &v[0]) == 1) c->music = v[0] < 0 ? 0 : v[0] > 100 ? 100 : v[0];
         else if (!strncmp(line, "name=", 5)) {
             line[strcspn(line, "\r\n")] = 0;
             snprintf(c->name, sizeof c->name, "%.23s", line + 5);

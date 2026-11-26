@@ -10,12 +10,15 @@
 #include "game.h"
 #include "gfx.h"
 #include "saves.h"
+#include "songs.h"
 
 #define UI_W 1280.0f
 #define UI_H 720.0f
 #define VIEW_H 320.0f
 
-typedef enum { SC_TITLE, SC_SELECT, SC_PLAY, SC_GARAGE, SC_CONTROLS, SC_ONLINE, SC_LEVEL } Scene;
+typedef enum {
+    SC_TITLE, SC_SELECT, SC_PLAY, SC_GARAGE, SC_CONTROLS, SC_ONLINE, SC_LEVEL, SC_SETTINGS, SC_SONGS
+} Scene;
 
 typedef struct {
     char path[600];
@@ -24,7 +27,9 @@ typedef struct {
     int diff;           // difficulty face index (0 = N/A)
     int stars;
     int official;
+    int track;          // official levels: number of the song
     GdLevelInfo info;   // custom levels: creator, length ...
+    char song_name[SONG_NAME];   // .aiogdl: file name of the song inside, else empty
     float best;
 } LevelEntry;
 
@@ -35,7 +40,8 @@ enum {
     H_NONE, H_PLAY, H_GARAGE, H_ONLINE, H_SETTINGS, H_QUIT, H_BACK, H_PREV, H_NEXT, H_CARD, H_PAGEDOT,
     H_RESUME, H_RESTART, H_MENU,
     H_TAB, H_ICON, H_TURN, H_DOT, H_COLORS, H_CLOSE, H_WHICH, H_SWATCH,
-    H_ROW, H_START, H_BIND, H_RESET
+    H_ROW, H_START, H_BIND, H_RESET,
+    H_KEYS, H_VOLUME, H_SONG, H_SONGROW
 };
 
 #define MAX_HOT 256
@@ -44,7 +50,7 @@ typedef struct {
     Gfx g;
     GfxFont big, gold;
     GfxImage gradient, dark, bar, title_bg, bg, ground, ground2, ground_menu, groove, stripes, dot;
-    GfxImage brown, grey, green_btn, grey_btn, white;
+    GfxImage brown, grey, green_btn, grey_btn, white, slider, thumb;
     float lw, lh;       // drawing size (1280x720; the level tour renders 16:10)
     Hot hot[MAX_HOT];
     int nhot;
@@ -79,6 +85,17 @@ typedef struct {
     int which;          // colour page: 0 first colour, 1 second
     Anim pose[2];       // standing robot and spider
     int pose_loaded;
+    char music_dir[512];                      // the player's own songs
+    char songs[SONGS_MAX_FILES][SONG_NAME];   // their file names, read when the song list opens
+    int nsongs, song_sel;                     // song list: row chosen
+    float song_scroll;
+    char preview[720];                        // song list: file being tried out
+    char music_key[900];                      // what the music player was last told to play
+    int music_faded;
+    float slider_x0[2], slider_x1[2];         // volume sliders of the screen shown, in points
+    int dragging;                             // slider being dragged (1 music, 2 effects), else 0
+    float intro;                              // seconds until the level chosen in a menu begins
+    int hitch;                                // a level was just loaded: do not count that time
     int capturing;      // key bindings: waiting for a key / pad button
     int ctl_row, ctl_col;
     double dbg_sum_dt, dbg_sum_ds;  // development: sum of real vs smoothed frame times
@@ -93,6 +110,16 @@ int start_level(App *a, int idx);
 void restart(App *a);
 void leave_level(App *a);
 void apply_skin(App *a);
+// How long the original takes from pressing play to the start of the level.
+#define LEVEL_INTRO 1.15f
+// A sound effect of the original, from the game's folder.
+void play_effect(const App *a, int id);
+// The file with the music of a level; 0 if it has none.
+int level_song(const App *a, int idx, char *out, size_t cap);
+// Name under which the song chosen for a custom level is kept.
+void level_song_key(const LevelEntry *e, char *out, size_t cap);
+// The choice that holds for a custom level: what the player picked, else the song of its file.
+const char *level_choice(const LevelEntry *e);
 
 // ---- menus.c
 void ui_load(App *a);                    // images and fonts of the menus
@@ -101,6 +128,7 @@ void ui_draw_pause(App *a);
 void ui_draw_complete(App *a);
 void ui_go(App *a, Scene s);
 void ui_open_garage(App *a, int tab, int colors);
+void ui_open_songs(App *a);   // song list of the chosen custom level
 void ui_event(App *a, const SDL_Event *e);
 // Text centred vertically at (x,y) in points (320 from the bottom to the top of the screen).
 void label(App *a, const GfxFont *f, const char *s, float x, float y, float scale, int align,

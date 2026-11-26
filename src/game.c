@@ -136,6 +136,8 @@ static void parse_header(Game *gm, const char *h)
             gm->start_speed = atoi(val);
         } else if (!strcmp(key, "kA2")) {
             gm->start_mode = atoi(val);
+        } else if (!strcmp(key, "kA13")) {
+            gm->song_offset = (float)atof(val);
         }
         key = rest;
     }
@@ -415,13 +417,16 @@ static void apply_phys(Obj *o, int id)
     }
 }
 
+static int add_effect(Game *gm, Gfx *g, int id);
+
 static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
 {
     classify_visual(gm, g, o, src);
     const int id = src->id;
     // triggers of newer versions that the engine acts on
     const int newer = id == 32 || id == 33 || id == 1520 || id == 2900 || id == 1935 || id == 3600 || id == 1917 || id == 2066 || id == 1347 || id == 1914 ||
-                      id == 1611 || id == 1811 || id == 1817 || id == 1912 || id == 2068 || id == 3607 || id == 1595 || id == 1815 || id == 3022;
+                      id == 1611 || id == 1811 || id == 1817 || id == 1912 || id == 2068 || id == 3607 || id == 1595 || id == 1815 || id == 3022 ||
+                      id == 1585;
     const int enter = (id >= 22 && id <= 28) || (id >= 55 && id <= 59) || id == 1915 || newer;
     if (o->type != OT_TRIGGER && (enter || id == 901 || id == 1007 || id == 1049 || id == 1268 || id == 1346 || id == 1006 ||
                                   id == 1616)) {
@@ -489,6 +494,11 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
     {
         const char *name = gd_object_frame(id);
         o->invisible = name && !strncmp(name, "invis_", 6);
+    }
+    if (o->type != OT_TRIGGER && (o->effect = (unsigned char)add_effect(gm, g, id))) {
+        o->fx_trigger = gd_obj_prop(src, 123, 0) != 0;   // "animate on trigger"
+        o->fx_speed = gd_obj_prop(src, 107, 1.0f);
+        if (o->fx_speed <= 0.01f) o->fx_speed = 1.0f;
     }
     // key 96: the object was placed with its glow switched off
     if (o->main && o->type != OT_TRIGGER && o->type != OT_ORB && o->type != OT_PAD && gd_obj_prop(src, 96, 0) == 0)
@@ -582,6 +592,30 @@ static int editor_only(int id)
     return 0;
 }
 
+// The frames of a 2.2 effect object ("gj22_anim_NN"): its number + 1, 0 if it is none.
+static int add_effect(Game *gm, Gfx *g, int id)
+{
+    const char *fr = gd_object_frame(id);
+    if (!fr || strncmp(fr, "gj22_anim_", 10)) return 0;
+    for (int i = 0; i < gm->neffects; i++) if (gm->effect[i].id == id) return i + 1;
+    const int max = (int)(sizeof gm->effect / sizeof gm->effect[0]);
+    const char *end = strstr(fr, "_001.png");
+    if (!end || gm->neffects >= max) return 0;
+    Effect *e = &gm->effect[gm->neffects];
+    int n = 0;
+    for (; n < EFFECT_FRAMES; n++) {
+        char name[96];
+        snprintf(name, sizeof name, "%.*s_%03d.png", (int)(end - fr), fr, n + 1);
+        if (!(e->main[n] = gfx_find(g, name))) break;
+        snprintf(name, sizeof name, "%.*s_color_%03d.png", (int)(end - fr), fr, n + 1);
+        e->color[n] = gfx_find(g, name);
+    }
+    if (n < 2) return 0;
+    e->id = id;
+    e->n = n;
+    return ++gm->neffects;
+}
+
 // Collects the numbered frames of a looping animation object (fires).
 static void add_loop(Game *gm, Gfx *g, int id)
 {
@@ -640,6 +674,7 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
     // the original picks one look for all rod balls of a level at random
     gm->ball_type = getenv("GD_HIDDEN") ? 2 : 1 + (int)(SDL_GetPerformanceCounter() % 3);
     parse_header(gm, lvl.header);
+    gm->pulse = gm->loud = -1.0f;
     memcpy(gm->ch0, gm->ch, sizeof gm->ch);
     gm->ch0_valid = 1;
     add_teleport_exits(&lvl);
@@ -884,6 +919,7 @@ void game_free(Game *gm)
 
 void game_reset(Game *gm)
 {
+    gm->run++;
     gm->jumps = 0;
     gm->npt = 0; gm->dead_fx = 0; gm->emit_t = 0;
     gm->enter_fx = 0;
@@ -1426,6 +1462,15 @@ static void fire_trigger(Game *gm, Obj *t, int depth)
     case 1616: // stop: cancel the running commands of a group
         for (int i = 0; i < gm->nmv;)
             if (gm->mv[i].group == t->tgroup) gm->mv[i] = gm->mv[--gm->nmv]; else i++;
+        break;
+    case 1585:   // animate: starts the effects of a group that wait for it
+        if (t->tgroup > 0 && t->tgroup < GD_GROUPS)
+            for (int i = gm->grp_start[t->tgroup]; i < gm->grp_start[t->tgroup + 1]; i++) {
+                Obj *o = &gm->obj[gm->grp_items[i]];
+                if (!o->effect || !o->fx_trigger) continue;
+                o->fx_at = gm->anim_t;
+                o->fx_run = gm->run;
+            }
         break;
     case 1049: // toggle
         if (t->tgroup > 0 && t->tgroup < GD_GROUPS)
@@ -2872,10 +2917,11 @@ static void draw_sparks(const Game *gm, Gfx *g, const Obj *o, float cx, float cy
     }
 }
 
-// The original sizes some decorations with the loudness of the song. There is no audio here, so a
-// steady 140 bpm beat stands in: 1 on the beat, dying away until the next one.
+// The original sizes some decorations with the loudness of the song: 1 on a beat, dying away
+// until the next one. Without music a steady 140 bpm beat stands in.
 static float music_pulse(const Game *gm)
 {
+    if (gm->pulse >= 0) return gm->pulse;
     return expf(-4.0f * fmodf(gm->anim_t * (140.0f / 60.0f), 1.0f));
 }
 
@@ -2888,7 +2934,9 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
         shaped = *o;
         shaped.rot += o->spin * gm->anim_t;
         if (o->beat) {
-            const float k = o->beat == 1 ? 0.25f + 0.65f * music_pulse(gm) : 0.65f + 0.45f * music_pulse(gm);
+            float k = o->beat == 1 ? 0.25f + 0.65f * music_pulse(gm) : 0.65f + 0.45f * music_pulse(gm);
+            // orbs also shrink while the music is quiet (in the original the first orb of Dash is small)
+            if (o->beat == 2 && gm->loud >= 0) k *= fminf(0.7f + 2.0f * gm->loud, 1.0f);
             shaped.sx *= k;
             shaped.sy *= k;
         }
@@ -2901,6 +2949,31 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     if (beast >= 0 && gm->anim && gm->anim[beast].nframes) {
         draw_beast(gm, g, o, beast, cx, cy, s, oa);
         return;
+    }
+    Obj frame;
+    if (o->effect) {   // 2.2 effects: sprite in the first colour, "_color" core in the second
+        const Effect *e = &gm->effect[o->effect - 1];
+        const float length = 0.05f / o->fx_speed;   // seconds per frame
+        int fr;
+        if (o->fx_trigger) {
+            if (o->fx_run != gm->run) return;
+            fr = (int)((gm->anim_t - o->fx_at) / length);
+            if (fr < 0 || fr >= e->n) return;
+        } else {
+            fr = (int)(gm->anim_t / length + o->x * 0.37f + o->y * 0.11f) % e->n;
+            if (fr < 0) fr += e->n;
+        }
+        frame = *o;
+        frame.main = e->main[fr];
+        frame.detail = e->color[fr];
+        if (o->id == 2047) {   // the burst: a recording of the original shows the colours exchanged
+            frame.ch_main = o->ch_detail;
+            frame.ch_detail = o->ch_main;
+            frame.hsv1 = o->hsv2;
+            frame.hsv2 = o->hsv1;
+        }
+        frame.kidset = -1;
+        o = &frame;
     }
     GdColorF col = chan_color(gm, o->ch_main, &add);
     if (o->id >= 920 && o->id <= 925) {   // fires cycle through their frames

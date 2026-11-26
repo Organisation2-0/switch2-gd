@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../vendor/stb_image.h" // stbi_zlib_decode_* (implementation lives in image.c)
+#include "aio.h"
 
 // strsep is not available everywhere (MinGW), so keep a tiny copy.
 static char *gd_strsep(char **sp, const char *delim)
@@ -83,21 +84,6 @@ char *gd_decode_levelstring(const char *src, size_t len, size_t *out_len)
     free(bin);
     if (out_len) *out_len = gn;
     return res;
-}
-
-static char *read_file(const char *path, size_t *n)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-    *n = fread(buf, 1, (size_t)sz, f);
-    buf[*n] = 0;
-    fclose(f);
-    return buf;
 }
 
 // Finds <k>key</k><s>VALUE</s> in a GD plist; returns malloc'd VALUE or NULL.
@@ -224,7 +210,7 @@ int gd_level_load(const char *path, GdLevel *out)
 {
     memset(out, 0, sizeof *out);
     size_t n = 0;
-    char *raw = read_file(path, &n);
+    char *raw = (char *)aio_level_file(path, &n);   // an .aiogdl holds the level file inside
     if (!raw) return -1;
 
     char *dec;

@@ -8,7 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #include "app.h"
+#include "audio.h"
 
 // ------------------------------------------------------------ primitives
 
@@ -86,6 +93,7 @@ static void panel(App *a, const GfxImage *im, float x0, float y0, float w, float
 
 static void box(App *a, float x0, float y0, float w, float h, GdColorF c)
 {
+    if (w <= 0) return;
     const float p = pt_scale(a);
     gfx_fill(&a->g, (SDL_FRect){x0 * p, (320.0f - y0 - h) * p, w * p, h * p}, c);
 }
@@ -116,6 +124,25 @@ static void bar(App *a, float x, float y, float w, float percent, GdColorF fill)
     char s[16];
     snprintf(s, sizeof s, "%d%%", (int)percent);
     label(a, &a->big, s, x, y - 0.5f, h * 0.03f, 1, WHITE, 0);
+}
+
+// A volume (which: 0 music, 1 effects) as a slider like the original's, from x0 to x1 at height y.
+static void volume_slider(App *a, int which, float x0, float x1, float y)
+{
+    const float p = pt_scale(a), w = x1 - x0, h = w * a->slider.h / (a->slider.w ? a->slider.w : 1);
+    const float at = (which ? a->cfg.sfx : a->cfg.music) / 100.0f;
+    a->slider_x0[which] = x0;
+    a->slider_x1[which] = x1;
+    if (a->slider.tex) {
+        box(a, x0 + 2.0f, y - h * 0.22f, (w - 4.0f) * at, h * 0.44f, C(60, 200, 255, 1));
+        gfx_image_rect(&a->g, &a->slider, (SDL_FRect){0, 0, (float)a->slider.w, (float)a->slider.h},
+                       (SDL_FRect){x0 * p, (320.0f - y - h * 0.5f) * p, w * p, h * p}, WHITE);
+    }
+    const float d = 18.0f * swell(a, H_VOLUME, which);
+    if (a->thumb.tex)
+        gfx_image_rect(&a->g, &a->thumb, (SDL_FRect){0, 0, (float)a->thumb.w, (float)a->thumb.h},
+                       (SDL_FRect){(x0 + w * at - d * 0.5f) * p, (320.0f - y - d * 0.5f) * p, d * p, d * p}, WHITE);
+    hot_add(a, (x0 + x1) * 0.5f, y, w + 16.0f, 24.0f, H_VOLUME, which);
 }
 
 static void gradient(App *a, GdColorF c)
@@ -354,6 +381,17 @@ static void list_follow(App *a)
     a->scroll = fminf(fmaxf(a->scroll, 0.0f), list_limit(a));
 }
 
+// The frame around a list, with its title.
+static void table_frame(App *a, const char *title)
+{
+    const float mid = pt_width(a) * 0.5f, side_h = (LIST_TOP - LIST_BOTTOM) / 64.0f;
+    spr_xy(a, "GJ_table_side_001.png", mid - 183.0f, (LIST_TOP + LIST_BOTTOM) * 0.5f, 1.0f, side_h, WHITE);
+    spr_xy(a, "GJ_table_side_001.png", mid + 183.0f, (LIST_TOP + LIST_BOTTOM) * 0.5f, -1.0f, side_h, WHITE);
+    spr(a, "GJ_table_top_001.png", mid, 276.0f, 1.0f, WHITE, 0);
+    spr(a, "GJ_table_bottom_001.png", mid, 36.0f, 1.0f, WHITE, 0);
+    label(a, &a->big, title, mid, 281.0f, 0.82f, 1, WHITE, 260.0f);
+}
+
 static void draw_online(App *a)
 {
     const float p = pt_scale(a), W = pt_width(a), mid = W * 0.5f;
@@ -401,19 +439,68 @@ static void draw_online(App *a)
         label(a, &a->gold, a->custom_dir, mid, 120.0f, 0.5f, 1, WHITE, 320.0f);
     }
 
-    // frame of the list
-    const float side_h = (LIST_TOP - LIST_BOTTOM) / 64.0f;
-    spr_xy(a, "GJ_table_side_001.png", mid - 183.0f, (LIST_TOP + LIST_BOTTOM) * 0.5f, 1.0f, side_h, WHITE);
-    spr_xy(a, "GJ_table_side_001.png", mid + 183.0f, (LIST_TOP + LIST_BOTTOM) * 0.5f, -1.0f, side_h, WHITE);
-    spr(a, "GJ_table_top_001.png", mid, 276.0f, 1.0f, WHITE, 0);
-    spr(a, "GJ_table_bottom_001.png", mid, 36.0f, 1.0f, WHITE, 0);
-    label(a, &a->big, "Online Levels", mid, 281.0f, 0.82f, 1, WHITE, 260.0f);
+    table_frame(a, "Online Levels");
     if (n) {
         char s[32];
         snprintf(s, sizeof s, n == 1 ? "%d level" : "%d levels", n);
         label(a, &a->gold, s, W - 8.0f, 309.0f, 0.5f, 2, WHITE, 0);
     }
     spr_button(a, "GJ_arrow_01_001.png", 24.0f, 297.0f, 1.0f, H_BACK, 0, 0);
+}
+
+// The custom level shown, and the song chosen for it.
+static const LevelEntry *shown_level(const App *a)
+{
+    return a->online_sel < n_custom(a) ? &a->levels[a->nofficial + a->online_sel] : NULL;
+}
+
+static const char *current_choice(const App *a)
+{
+    return shown_level(a) ? level_choice(shown_level(a)) : "none";
+}
+
+// UTF-8 as the fonts of the game can show it: umlauts spelled out, other special letters as "?".
+static void plain_letters(const char *in, char *out, size_t cap)
+{
+    static const struct { unsigned char second; const char *as; } umlaut[] = {
+        {0xA4, "ae"}, {0xB6, "oe"}, {0xBC, "ue"}, {0x84, "Ae"}, {0x96, "Oe"}, {0x9C, "Ue"}, {0x9F, "ss"}};
+    size_t o = 0;
+    for (const unsigned char *s = (const unsigned char *)in; *s && o + 3 < cap; s++) {
+        if (*s < 0x80) { out[o++] = (char)*s; continue; }
+        const char *as = NULL;
+        for (int i = 0; *s == 0xC3 && i < 7; i++)
+            if (s[1] == umlaut[i].second) as = umlaut[i].as;
+        if (as) { out[o++] = as[0]; out[o++] = as[1]; s++; }
+        else if (*s >= 0xC0) out[o++] = '?';
+    }
+    out[o] = 0;
+}
+
+// Name of a choice and what kind of song it is; a file that has gone counts as none.
+static void song_title(const App *a, const char *choice, int verify, char *title, size_t n, char *kind, size_t m)
+{
+    char path[720];
+    snprintf(title, n, "No music");
+    snprintf(kind, m, "No song chosen");
+    if (!strcmp(choice, "none")) return;
+    if (!strcmp(choice, "bundle")) {
+        const LevelEntry *e = shown_level(a);
+        if (!e) return;
+        plain_letters(e->song_name, title, n);
+        char *dot = strrchr(title, '.');
+        if (dot) *dot = 0;
+        snprintf(kind, m, "Song of this level file");
+    } else if (!songs_path(choice, a->resdir, a->music_dir, path, sizeof path) || (verify && !songs_present(path))) {
+        snprintf(kind, m, "File not found");
+    } else if (!strncmp(choice, "official:", 9)) {
+        snprintf(title, n, "%s", g_official_songs[atoi(choice + 9)].title);
+        snprintf(kind, m, "Official song");
+    } else {
+        plain_letters(choice + 5, title, n);
+        char *dot = strrchr(title, '.');
+        if (dot) *dot = 0;
+        snprintf(kind, m, "Your music file");
+    }
 }
 
 static void draw_level(App *a)
@@ -454,6 +541,95 @@ static void draw_level(App *a)
     }
     label(a, &a->big, "Normal Mode", mid, 150.0f, 0.5f, 1, WHITE, 0);
     bar(a, mid, 136.0f, 238.0f, e->best, C(0, 255, 0, 1));
+
+    // the song, where the original shows it
+    char title[SONG_NAME], kind[32];
+    song_title(a, current_choice(a), 1, title, sizeof title, kind, sizeof kind);
+    panel(a, &a->brown, mid - 150.0f, 14.0f, 300.0f, 78.0f, 12.0f, WHITE);
+    label(a, &a->big, title, mid - 137.0f, 68.0f, 0.7f, 0, WHITE, 274.0f);
+    label(a, &a->gold, kind, mid - 137.0f, 37.0f, 0.55f, 0, WHITE, 180.0f);
+    text_button(a, &a->green_btn, &a->big, "Change", mid + 102.0f, 37.0f, 68.0f, 26.0f, 0.55f, H_SONG, 0, WHITE);
+}
+
+// ------------------------------------------------------------ song list
+
+#define SONG_TOP 264.0f
+#define SONG_H 36.0f
+
+// rows: the song inside the level file (if it has one), no music, the player's files, the songs
+// of the original
+static int bundled(const App *a) { return shown_level(a) && shown_level(a)->song_name[0]; }
+
+static int song_rows(const App *a) { return bundled(a) + 1 + a->nsongs + SONGS_OFFICIAL; }
+
+static void song_choice_of_row(const App *a, int row, char *out, size_t cap)
+{
+    row -= bundled(a);
+    if (row < 0) snprintf(out, cap, "bundle");
+    else if (row == 0) snprintf(out, cap, "none");
+    else if (row <= a->nsongs) snprintf(out, cap, "file:%s", a->songs[row - 1]);
+    else snprintf(out, cap, "official:%d", row - 1 - a->nsongs);
+}
+
+static float song_limit(const App *a) { return fmaxf(0.0f, song_rows(a) * SONG_H - (SONG_TOP - LIST_BOTTOM)); }
+
+static void song_follow(App *a)
+{
+    const float top = a->song_sel * SONG_H, view = SONG_TOP - LIST_BOTTOM;
+    if (a->song_scroll > top) a->song_scroll = top;
+    if (a->song_scroll < top + SONG_H - view) a->song_scroll = top + SONG_H - view;
+    a->song_scroll = fminf(fmaxf(a->song_scroll, 0.0f), song_limit(a));
+}
+
+static void draw_songs(App *a)
+{
+    const float p = pt_scale(a), W = pt_width(a), mid = W * 0.5f;
+    gradient(a, C(0, 102, 255, 1));
+    bottom_corners(a);
+    box(a, mid - 176.0f, LIST_BOTTOM, 352.0f, SONG_TOP - LIST_BOTTOM, C(161, 88, 44, 1));
+    const SDL_Rect clip = {(int)((mid - 176.0f) * p), (int)((320.0f - SONG_TOP) * p), (int)(352.0f * p),
+                           (int)((SONG_TOP - LIST_BOTTOM) * p + 0.5f)};
+    gfx_set_clip(&a->g, &clip);
+    const char *chosen = current_choice(a);
+    for (int i = 0; i < song_rows(a); i++) {
+        const float top = SONG_TOP - i * SONG_H + a->song_scroll;
+        if (top <= LIST_BOTTOM || top - SONG_H >= SONG_TOP) continue;
+        char choice[SONG_NAME + 12], title[SONG_NAME], kind[32];
+        song_choice_of_row(a, i, choice, sizeof choice);
+        song_title(a, choice, 0, title, sizeof title, kind, sizeof kind);   // files just listed
+        const int mine = !strcmp(choice, chosen), cursor = a->show_focus && i == a->song_sel;
+        box(a, mid - 176.0f, top - SONG_H, 352.0f, SONG_H,
+            cursor ? C(224, 150, 92, 1) : i & 1 ? C(194, 114, 62, 1) : C(161, 88, 44, 1));
+        box(a, mid - 176.0f, top - SONG_H, 352.0f, 0.6f, C(60, 30, 12, 1));
+        label(a, &a->big, title, mid - 164.0f, top - 13.0f, 0.55f, 0, WHITE, 285.0f);
+        label(a, &a->gold, kind, mid - 164.0f, top - 27.0f, 0.34f, 0, WHITE, 285.0f);
+        if (mine) spr(a, "GJ_completesIcon_001.png", mid + 150.0f, top - SONG_H * 0.5f, 0.9f, WHITE, 0);
+        const float hi = fminf(top, SONG_TOP), lo = fmaxf(top - SONG_H, LIST_BOTTOM);
+        if (hi - lo > 8.0f) hot_add(a, mid, (hi + lo) * 0.5f, 352.0f, hi - lo, H_SONGROW, i);
+    }
+    gfx_set_clip(&a->g, NULL);
+    table_frame(a, "Songs");
+    label(a, &a->big, "Your own songs: put .mp3, .ogg or .wav files into", mid, 15.0f, 0.3f, 1, WHITE, W - 150.0f);
+    label(a, &a->gold, a->music_dir, mid, 5.5f, 0.35f, 1, WHITE, W - 150.0f);
+    spr_button(a, "GJ_arrow_01_001.png", 24.0f, 297.0f, 1.0f, H_BACK, 0, 0);
+}
+
+// ------------------------------------------------------------ settings
+
+static void draw_settings(App *a)
+{
+    const float W = pt_width(a), mid = W * 0.5f;
+    draw_title(a);
+    dim(a, 0.55f);
+    a->nhot = 0;
+    box(a, mid - 176.0f, LIST_BOTTOM, 352.0f, LIST_TOP - LIST_BOTTOM, C(0, 0, 0, 0.6f));
+    table_frame(a, "Settings");
+    text_button(a, &a->green_btn, &a->gold, "Keys", mid, 212.0f, 150.0f, 30.0f, 0.85f, H_KEYS, 0, WHITE);
+    label(a, &a->big, "Music", mid, 140.0f, 0.7f, 1, WHITE, 0);
+    volume_slider(a, 0, mid - 104.0f, mid + 104.0f, 117.0f);
+    label(a, &a->big, "SFX", mid, 92.0f, 0.7f, 1, WHITE, 0);
+    volume_slider(a, 1, mid - 104.0f, mid + 104.0f, 69.0f);
+    spr_button(a, "GJ_arrow_03_001.png", 24.0f, 297.0f, 1.0f, H_BACK, 0, 0);
 }
 
 // ------------------------------------------------------------ garage
@@ -652,6 +828,10 @@ void ui_draw_pause(App *a)
     spr_button(a, "GJ_menuBtn_001.png", mid - 85.0f, 130.0f, 0.92f, H_MENU, 0, 0);
     spr_button(a, "GJ_playBtn2_001.png", mid, 130.0f, 1.0f, H_RESUME, 0, 0);
     spr_button(a, "GJ_replayBtn_001.png", mid + 85.0f, 130.0f, 0.92f, H_RESTART, 0, 0);
+    spr(a, "gj_songIcon_001.png", mid - 191.0f, 70.0f, 0.8f, WHITE, 0);
+    volume_slider(a, 0, mid - 173.0f, mid - 27.0f, 70.0f);
+    spr(a, "GJ_sfxIcon_001.png", mid + 10.0f, 70.0f, 0.8f, WHITE, 0);
+    volume_slider(a, 1, mid + 27.0f, mid + 173.0f, 70.0f);
 }
 
 void ui_draw_complete(App *a)
@@ -687,6 +867,8 @@ void ui_draw(App *a)
     case SC_CONTROLS: draw_controls(a); break;
     case SC_ONLINE: draw_online(a); break;
     case SC_LEVEL: draw_level(a); break;
+    case SC_SETTINGS: draw_settings(a); break;
+    case SC_SONGS: draw_songs(a); break;
     case SC_PLAY: break;
     }
 }
@@ -701,7 +883,9 @@ void ui_load(App *a)
         {&a->dot, "smallDot-hd.png"},             {&a->ground_menu, "groundSquare_01_001-hd.png"},
         {&a->groove, "slidergroove2-hd.png"},     {&a->stripes, "sliderBar2-hd.png"},
         {&a->grey, "GJ_square05-hd.png"},         {&a->green_btn, "GJ_button_01-hd.png"},
-        {&a->grey_btn, "GJ_button_04-hd.png"},    {&a->white, "square02b_001-hd.png"}};
+        {&a->grey_btn, "GJ_button_04-hd.png"},    {&a->white, "square02b_001-hd.png"},
+        {&a->brown, "GJ_square01-hd.png"},        {&a->slider, "slidergroove-hd.png"},
+        {&a->thumb, "sliderthumb-hd.png"}};
     for (size_t i = 0; i < sizeof images / sizeof images[0]; i++)
         if (gfx_load_image(&a->g, images[i].file, images[i].im))
             fprintf(stderr, "missing %s (run prepare-sd.ps1 again?)\n", images[i].file);
@@ -722,6 +906,8 @@ static void default_focus(App *a)
         else { a->focus_id = H_ICON; a->focus_arg = a->cfg.icon[a->tab]; }
         break;
     case SC_CONTROLS: a->focus_id = H_BIND; break;
+    case SC_SETTINGS: a->focus_id = H_KEYS; break;
+    case SC_LEVEL: a->focus_id = H_START; break;
     case SC_PLAY: a->focus_id = a->game.finished ? H_RESTART : H_RESUME; break;
     default: a->focus_id = H_NONE; break;
     }
@@ -756,6 +942,14 @@ static void back(App *a)
     case SC_SELECT:
     case SC_ONLINE: ui_go(a, SC_TITLE); break;
     case SC_LEVEL: ui_go(a, SC_ONLINE); break;
+    case SC_SETTINGS:
+        save_config(a);
+        ui_go(a, SC_TITLE);
+        break;
+    case SC_SONGS:
+        a->preview[0] = 0;
+        ui_go(a, SC_LEVEL);
+        break;
     case SC_GARAGE:
         save_config(a);
         if (a->colors) { a->colors = 0; default_focus(a); }
@@ -763,7 +957,7 @@ static void back(App *a)
         break;
     case SC_CONTROLS:
         save_config(a);
-        ui_go(a, SC_TITLE);
+        ui_go(a, SC_SETTINGS);
         break;
     case SC_PLAY:
         if (a->game.finished || a->paused) leave_level(a);
@@ -782,7 +976,55 @@ static void open_level(App *a, int i)
 
 static void play(App *a, int idx)
 {
-    if (idx >= 0 && idx < a->nlevels && start_level(a, idx) != 0) fprintf(stderr, "level load failed\n");
+    if (idx < 0 || idx >= a->nlevels) return;
+    if (start_level(a, idx) != 0) { fprintf(stderr, "level load failed\n"); return; }
+    a->intro = LEVEL_INTRO;
+    play_effect(a, SFX_PLAY);
+}
+
+void ui_open_songs(App *a)
+{
+    // made on first use, so that it is there to put files into
+#ifdef _WIN32
+    _mkdir(a->music_dir);
+#else
+    mkdir(a->music_dir, 0777);
+#endif
+    a->nsongs = songs_scan(a->music_dir, a->songs, SONGS_MAX_FILES);
+    ui_go(a, SC_SONGS);
+    a->preview[0] = 0;
+    a->song_sel = 0;
+    for (int i = 0; i < song_rows(a); i++) {
+        char choice[SONG_NAME + 12];
+        song_choice_of_row(a, i, choice, sizeof choice);
+        if (!strcmp(choice, current_choice(a))) a->song_sel = i;
+    }
+    a->song_scroll = 0;
+    song_follow(a);
+}
+
+// Chooses a row of the song list and plays it.
+static void choose_song(App *a, int row)
+{
+    if (row < 0 || row >= song_rows(a) || a->online_sel >= n_custom(a)) return;
+    char key[SONG_NAME + 8], choice[SONG_NAME + 12];
+    level_song_key(&a->levels[a->nofficial + a->online_sel], key, sizeof key);
+    song_choice_of_row(a, row, choice, sizeof choice);
+    songs_choose(key, choice);
+    a->song_sel = row;
+    if (!level_song(a, a->nofficial + a->online_sel, a->preview, sizeof a->preview)) a->preview[0] = 0;
+}
+
+static void set_volume(App *a, int which, int v)
+{
+    *(which ? &a->cfg.sfx : &a->cfg.music) = v < 0 ? 0 : v > 100 ? 100 : v;
+}
+
+// volume from a horizontal position on the screen (UI px)
+static void slide_to(App *a, int which, float x)
+{
+    const float at = x / pt_scale(a), w = a->slider_x1[which] - a->slider_x0[which];
+    if (w > 0) set_volume(a, which, (int)((at - a->slider_x0[which]) / w * 100.0f + 0.5f));
 }
 
 static void step_level(App *a, int dir)
@@ -796,7 +1038,10 @@ static void activate(App *a, int id, int arg)
     case H_PLAY: ui_go(a, SC_SELECT); break;
     case H_GARAGE: ui_open_garage(a, IC_CUBE, 0); break;
     case H_ONLINE: ui_go(a, SC_ONLINE); list_follow(a); break;
-    case H_SETTINGS: ui_go(a, SC_CONTROLS); break;
+    case H_SETTINGS: ui_go(a, SC_SETTINGS); break;
+    case H_KEYS: ui_go(a, SC_CONTROLS); break;
+    case H_SONG: ui_open_songs(a); break;
+    case H_SONGROW: choose_song(a, arg); break;
     case H_QUIT: a->quit = 1; break;
     case H_BACK: back(a); break;
     case H_PREV: step_level(a, -1); break;
@@ -832,7 +1077,11 @@ static void confirm(App *a)
     switch (a->scene) {
     case SC_SELECT: play(a, a->sel); break;
     case SC_ONLINE: open_level(a, a->online_sel); break;
-    case SC_LEVEL: activate(a, H_START, 0); break;
+    case SC_LEVEL:
+        if (a->show_focus) activate(a, a->focus_id, a->focus_arg);
+        else activate(a, H_START, 0);
+        break;
+    case SC_SONGS: choose_song(a, a->song_sel); break;
     case SC_GARAGE:
         if (!a->show_focus) { a->show_focus = 1; default_focus(a); }
         else activate(a, a->focus_id, a->focus_arg);
@@ -848,7 +1097,25 @@ static void confirm(App *a)
 static void navigate(App *a, int dx, int dy)
 {
     if (a->scene == SC_SELECT) { if (dx) step_level(a, dx); return; }
-    if (a->scene == SC_LEVEL) return;
+    if (a->scene == SC_SONGS) {
+        if (a->show_focus) a->song_sel += dy;
+        a->show_focus = 1;
+        if (a->song_sel < 0) a->song_sel = 0;
+        if (a->song_sel >= song_rows(a)) a->song_sel = song_rows(a) - 1;
+        song_follow(a);
+        return;
+    }
+    // left / right move the volume while its slider is chosen
+    if (dx && a->show_focus && a->focus_id == H_VOLUME) {
+        set_volume(a, a->focus_arg, (a->focus_arg ? a->cfg.sfx : a->cfg.music) + 10 * dx);
+        save_config(a);
+        return;
+    }
+    // in the pause menu the two sliders stand side by side: down / up go from one to the other
+    if (dy && a->scene == SC_PLAY && a->show_focus && a->focus_id == H_VOLUME && a->focus_arg == (dy < 0)) {
+        a->focus_arg = dy > 0;
+        return;
+    }
     if (a->scene == SC_ONLINE) {
         if (!n_custom(a)) return;
         if (a->show_focus) a->online_sel += dy;
@@ -896,6 +1163,11 @@ static void click(App *a, float x, float y, int right)
     if (id == H_SWATCH && right) {   // right click: the second colour
         a->cfg.col2 = arg;
         save_config(a);
+        return;
+    }
+    if (id == H_VOLUME) {   // jumps to the click and follows the mouse
+        slide_to(a, arg, x);
+        a->dragging = arg + 1;
         return;
     }
     if (id == H_BIND) a->show_focus = 1;   // shows which binding waits for the key
@@ -984,6 +1256,7 @@ void ui_event(App *a, const SDL_Event *e)
         if (!playing(a)) {
             if (a->scene == SC_TITLE && sym == SDLK_g) { activate(a, H_GARAGE, 0); break; }
             if (a->scene == SC_TITLE && sym == SDLK_o) { activate(a, H_SETTINGS, 0); break; }
+            if (a->scene == SC_LEVEL && sym == SDLK_m) { activate(a, H_SONG, 0); break; }
             if (a->scene == SC_CONTROLS && sym == SDLK_DELETE) { clear_binding(a); break; }
             if (a->scene == SC_GARAGE && !a->colors && (sym == SDLK_PAGEUP || sym == SDLK_PAGEDOWN)) {
                 turn_page(a, sym == SDLK_PAGEUP ? -1 : 1);
@@ -1019,12 +1292,23 @@ void ui_event(App *a, const SDL_Event *e)
         break;
     }
     case SDL_MOUSEBUTTONUP:
+        if (a->dragging) { a->dragging = 0; save_config(a); }
         if (a->scene == SC_PLAY) game_set_hold(&a->game, 0);
+        break;
+    case SDL_MOUSEMOTION:
+        if (a->dragging) {
+            float x, y;
+            to_ui(a, e->motion.x, e->motion.y, &x, &y);
+            slide_to(a, a->dragging - 1, x);
+        }
         break;
     case SDL_MOUSEWHEEL:
         if (a->scene == SC_ONLINE) {
             a->show_focus = 0;
             a->scroll = fminf(fmaxf(a->scroll - e->wheel.y * 30.0f, 0.0f), list_limit(a));
+        } else if (a->scene == SC_SONGS) {
+            a->show_focus = 0;
+            a->song_scroll = fminf(fmaxf(a->song_scroll - e->wheel.y * 30.0f, 0.0f), song_limit(a));
         } else if (a->scene == SC_GARAGE && !a->colors && e->wheel.y) {
             turn_page(a, e->wheel.y > 0 ? -1 : 1);
         } else if (a->scene == SC_SELECT && e->wheel.y) {
@@ -1037,6 +1321,7 @@ void ui_event(App *a, const SDL_Event *e)
         if (!playing(a)) {
             if (a->scene == SC_TITLE && b == 2) { activate(a, H_GARAGE, 0); break; }
             if (a->scene == SC_TITLE && b == 3) { activate(a, H_SETTINGS, 0); break; }
+            if (a->scene == SC_LEVEL && b == 3) { activate(a, H_SONG, 0); break; }
             if (a->scene == SC_CONTROLS && b == 3) { activate(a, H_RESET, 0); break; }
             if (a->scene == SC_CONTROLS && b == 2) { clear_binding(a); break; }
             if (a->scene == SC_GARAGE && b >= 6 && b <= 9) {   // L / R: page, ZL / ZR: form

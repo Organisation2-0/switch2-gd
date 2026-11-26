@@ -106,10 +106,21 @@ typedef struct {
     unsigned char clipw;           // textured slope decoration: width of the triangle its sprites are cut to
     unsigned char slope;           // triangle: 0 = none, else 1 | 2 (right angle on the right) | 4 (ceiling)
     const GdFrame *fx1, *fx2;      // portal swirl sprites
+    // 2.2 effects: animated sprites in two layers
+    unsigned char effect;          // number in Game.effect + 1, 0 = none
+    unsigned char fx_trigger;      // only plays (once) when an animate trigger starts it
+    int fx_run;                    // attempt in which it was started ...
+    float fx_at, fx_speed;         // ... and when; speed factor of the frames
 } Obj;
 
 #define GD_GROUPS 10000
 #define GD_MAX_PART 400
+#define EFFECT_FRAMES 16
+typedef struct {
+    int id, n;   // object id, number of frames
+    const GdFrame *main[EFFECT_FRAMES], *color[EFFECT_FRAMES];
+} Effect;
+
 typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; int square; } Particle;
 typedef struct { const GdChild *c; int n; const GdFrame *f[12]; } KidSet;
 #define GD_MAX_MOVES 64
@@ -175,6 +186,7 @@ typedef struct {
     const GfxImage *ground2;      // second layer of the ground texture (2.1 grounds), set by the app
     Anim *anim;                   // AN_COUNT entries (monsters, robot, spider)
     struct { int id, n; const GdFrame *main[16], *kid[16]; } loops[8]; int nloops;   // looping fires
+    Effect effect[32]; int neffects;   // 2.2 effect animations used by this level
     int ball_type;                // look of the music balls on rods (picked per level load, 1..3)
     float end_x;
     int start_mode, start_speed;
@@ -228,6 +240,10 @@ typedef struct {
     float c1[3], c2[3];
     int skin_set;
     int attempts, finished;
+    int run;              // counts the resets, so the song can start again with each attempt
+    float song_offset;    // seconds into the song at which the level starts (header kA13)
+    float pulse;          // how strongly the music beats, 0..1; below 0 without music
+    float loud;           // average loudness of the music, 0..1; below 0 without music
     int jumps;                    // button presses of this attempt (end screen)
     float best_percent, percent;
     char name[96];

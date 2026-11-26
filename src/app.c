@@ -17,7 +17,9 @@
 #include <dirent.h>
 #include "../vendor/stb_image.h"
 #endif
+#include "aio.h"
 #include "app.h"
+#include "audio.h"
 #include "bot.h"
 
 static const struct { const char *name; int diff, stars; } k_official[] = {
@@ -51,9 +53,16 @@ static LevelEntry *add_level(App *a)
 // A level file from the levels folder; its name, creator ... come from the file if it has them.
 static void add_file(App *a, const char *path, const char *file)
 {
+    if (strlen(path) >= sizeof a->levels->path) return;
     LevelEntry *e = add_level(a);
     snprintf(e->path, sizeof e->path, "%.*s", (int)sizeof e->path - 1, path);
     if (gd_info_file(path, &e->info)) e->info.length = -1;
+    if (aio_is_bundle(path)) {
+        size_t n = 0;
+        unsigned char *name = aio_chunk(path, "NAME", &n);
+        snprintf(e->song_name, sizeof e->song_name, "%s", name && *name ? (const char *)name : "Song");
+        free(name);
+    }
     if (e->info.name[0]) snprintf(e->name, sizeof e->name, "%s", e->info.name);
     else {
         snprintf(e->name, sizeof e->name, "%.90s", file);
@@ -80,20 +89,25 @@ static void scan_levels(App *a)
         e->diff = k_official[i].diff;
         e->stars = k_official[i].stars;
         e->official = 1;
+        e->track = i;
     }
     a->nofficial = a->nlevels;
     const int last = a->nofficial + MAX_FILES;
 #ifdef _WIN32
     char pat[640];
-    snprintf(pat, sizeof pat, "%s\\*.gdlvl", a->custom_dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pat, &fd);
+    wchar_t wide[640];   // file names as UTF-8
+    snprintf(pat, sizeof pat, "%s/*", a->custom_dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = MultiByteToWideChar(CP_UTF8, 0, pat, -1, wide, 640) ? FindFirstFileW(wide, &fd) : INVALID_HANDLE_VALUE;
     if (h != INVALID_HANDLE_VALUE) {
         do {
-            char path[900];
-            snprintf(path, sizeof path, "%s/%s", a->custom_dir, fd.cFileName);
-            add_file(a, path, fd.cFileName);
-        } while (FindNextFileA(h, &fd) && a->nlevels < last);
+            char name[600], path[1200];
+            if (!WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof name, NULL, NULL)) continue;
+            const char *dot = strrchr(name, '.');
+            if (!dot || (SDL_strcasecmp(dot, ".gdlvl") && SDL_strcasecmp(dot, AIO_EXTENSION))) continue;
+            snprintf(path, sizeof path, "%s/%s", a->custom_dir, name);
+            add_file(a, path, name);
+        } while (a->nlevels < last && FindNextFileW(h, &fd));
         FindClose(h);
     }
 #else
@@ -159,6 +173,9 @@ int start_level(App *a, int idx)
     a->game.ground2 = &a->ground2;
     apply_skin(a);
     a->cur = idx;
+    a->music_key[0] = 0;
+    a->hitch = 1;
+    a->intro = 0;
     ui_go(a, SC_PLAY);
     a->paused = 0;
     return 0;
@@ -166,6 +183,7 @@ int start_level(App *a, int idx)
 
 void leave_level(App *a)
 {
+    play_effect(a, SFX_QUIT);
     if (a->game_loaded) a->levels[a->cur].best = a->game.best_percent;
     if (a->cur < a->nofficial) {
         a->sel = a->cur;
@@ -178,9 +196,116 @@ void leave_level(App *a)
 
 void restart(App *a)
 {
+    a->intro = 0;
     game_reset(&a->game);
     a->game.attempts++;
     a->paused = 0;
+}
+
+// ------------------------------------------------------------ music
+
+void level_song_key(const LevelEntry *e, char *out, size_t cap)
+{
+    const char *name = e->path;
+    for (const char *p = e->path; *p; p++)
+        if (*p == '/' || *p == '\\') name = p + 1;
+    // a bundle is known by its file: a saved level with the same number may have another choice
+    if (e->info.id > 0 && !e->song_name[0]) snprintf(out, cap, "id:%d", e->info.id);
+    else snprintf(out, cap, "level:%s", name);
+}
+
+const char *level_choice(const LevelEntry *e)
+{
+    char key[SONG_NAME + 8];
+    level_song_key(e, key, sizeof key);
+    const char *picked = songs_choice(key);
+    if (*picked && (strcmp(picked, "bundle") || e->song_name[0])) return picked;
+    return e->song_name[0] ? "bundle" : "none";
+}
+
+int level_song(const App *a, int idx, char *out, size_t cap)
+{
+    const LevelEntry *e = &a->levels[idx];
+    if (e->official) {
+        char choice[24];
+        snprintf(choice, sizeof choice, "official:%d", e->track);
+        return songs_path(choice, a->resdir, a->music_dir, out, cap);
+    }
+    const char *choice = level_choice(e);
+    if (!strcmp(choice, "bundle")) {   // the player reads the song out of the level file
+        snprintf(out, cap, "%s", e->path);
+        return 1;
+    }
+    return songs_path(choice, a->resdir, a->music_dir, out, cap);
+}
+
+// The effects with their loudness against the music, measured in a recording of the original
+// (leaving a level was not in it and uses the level of the start sound).
+void play_effect(const App *a, int id)
+{
+    static const struct { const char *file; float gain; } k[SFX_COUNT] = {
+        {"playSound_01.ogg", 0.2f}, {"quitSound_01.ogg", 0.2f}, {"explode_11.ogg", 0.44f}};
+    char path[700];
+    snprintf(path, sizeof path, "%s/%s", a->resdir, k[id].file);
+    audio_sfx(id, path, k[id].gain);
+}
+
+// Tells the player what belongs to the present screen: the menu loop (it rises from silence), the
+// song of the level from the start of each attempt (silent after a crash), or the song tried out
+// in the song list.
+static void music_update(App *a)
+{
+    char path[720] = "", key[900];
+    double offset = 0;
+    int loop = 1;
+    float fade_in = 0;
+    const Game *gm = &a->game;
+    const int playing = a->scene == SC_PLAY && a->game_loaded;
+    if (playing && a->intro > 0) {
+        snprintf(key, sizeof key, "intro");
+    } else if (playing && gm->p.dead) {
+        snprintf(key, sizeof key, "crash");
+    } else if (playing) {
+        snprintf(key, sizeof key, "level %d run %d", a->cur, gm->run);
+        offset = gm->song_offset;
+        loop = 0;
+    } else if (a->scene == SC_SONGS && a->preview[0]) {
+        snprintf(path, sizeof path, "%s", a->preview);
+        snprintf(key, sizeof key, "try %s", path);
+        fade_in = 0.4f;
+    } else {
+        snprintf(path, sizeof path, "%s/menuLoop.mp3", a->resdir);
+        snprintf(key, sizeof key, "menu");
+        fade_in = 1.0f;
+    }
+    if (strcmp(key, a->music_key)) {
+        const int attempt = !strncmp(key, "level ", 6);
+        // a new attempt cuts off the sound of the crash
+        if (attempt && (!strcmp(a->music_key, "crash") || !strncmp(a->music_key, "level ", 6))) audio_sfx_stop();
+        snprintf(a->music_key, sizeof a->music_key, "%s", key);
+        a->music_faded = 0;
+        if (attempt && !level_song(a, a->cur, path, sizeof path)) path[0] = 0;
+        if (!strcmp(key, "crash")) {
+            audio_stop();
+            play_effect(a, SFX_CRASH);
+        } else if (!strcmp(key, "intro")) {
+            audio_fade_out(0.08f);   // the menu music ends with the press of the button
+        } else if (path[0]) {
+            audio_play(path, offset, loop, fade_in);
+        } else {
+            audio_stop();
+        }
+    }
+    audio_pause(playing && a->paused);
+    if (playing && gm->finished && !a->music_faded) {
+        audio_fade_out(1.5f);
+        a->music_faded = 1;
+    }
+    if (a->game_loaded) {
+        const int heard = playing && a->intro <= 0;
+        a->game.pulse = heard ? audio_pulse() : -1.0f;
+        a->game.loud = heard ? audio_loudness() : -1.0f;
+    }
 }
 
 // ------------------------------------------------------------ in-level display
@@ -499,7 +624,9 @@ static void render(App *a)
         a->shown = a->scene;
         a->shown_since = a->t;
     }
-    const float dark = 1.0f - (a->t - a->shown_since) / 0.25f;
+    float dark = 1.0f - (a->t - a->shown_since) / 0.25f;
+    // a level chosen in a menu appears out of the dark like in the original
+    if (a->scene == SC_PLAY && a->intro > 0) dark = fmaxf(dark, 1.0f - (LEVEL_INTRO - a->intro - 0.15f) / 0.5f);
     if (dark > 0) gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(0, 0, 0, fminf(dark, 1.0f)));
     gfx_present(&a->g);
 }
@@ -665,7 +792,8 @@ int main(int argc, char **argv)
     int level = 0, fullscreen = 0, bench_frames = 0;
     float tp_x = -1, tp_y = 15;
     int mode = -1, selftest_level = -1, rttest_level = -1;
-    float selftest_secs = 120;
+    float selftest_secs = 120, rt_secs = 0;
+    int rt_intro = 0;
     const char *bot_spec = NULL;
     int shot_mirror = 0, shot_mini = 0, shot_flip = 0, shot_dual = 0;
     int bot_speed = 1;
@@ -690,6 +818,12 @@ int main(int argc, char **argv)
 #else
              "gd-levels");
 #endif
+    snprintf(a->music_dir, sizeof a->music_dir, "%s",
+#ifdef __SWITCH__
+             "sdmc:/switch/gd/music");
+#else
+             "gd-music");
+#endif
     snprintf(a->cfg_path, sizeof a->cfg_path, "%s",
 #ifdef __SWITCH__
              "sdmc:/switch/gd/config.ini");
@@ -700,6 +834,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--res") && i + 1 < argc) snprintf(a->resdir, sizeof a->resdir, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--levels") && i + 1 < argc) snprintf(a->custom_dir, sizeof a->custom_dir, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) snprintf(a->cfg_path, sizeof a->cfg_path, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--music") && i + 1 < argc) snprintf(a->music_dir, sizeof a->music_dir, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--scene") && i + 1 < argc) scene = argv[++i];
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) level = atoi(argv[++i]);
@@ -708,11 +843,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc) mode = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--selftest") && i + 1 < argc) selftest_level = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rttest") && i + 1 < argc) rttest_level = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--secs") && i + 1 < argc) selftest_secs = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--secs") && i + 1 < argc) { selftest_secs = (float)atof(argv[++i]); rt_secs = selftest_secs; }
         else if (!strcmp(argv[i], "--bot") && i + 1 < argc) bot_spec = argv[++i];
         else if (!strcmp(argv[i], "--botspeed") && i + 1 < argc) bot_speed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bench") && i + 1 < argc) bench_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--intro")) rt_intro = 1;
         else if (!strcmp(argv[i], "--mirror")) shot_mirror = 1;
         else if (!strcmp(argv[i], "--mini")) shot_mini = 1;
         else if (!strcmp(argv[i], "--flip")) shot_flip = 1;
@@ -780,6 +916,14 @@ int main(int argc, char **argv)
     ui_load(a);
     scan_levels(a);
     config_load(&a->cfg, a->cfg_path);
+    {   // the chosen songs are kept next to the settings
+        char list[600];
+        const char *name = a->cfg_path;
+        for (const char *p = a->cfg_path; *p; p++)
+            if (*p == '/' || *p == '\\') name = p + 1;
+        snprintf(list, sizeof list, "%.*sgd-songs.ini", (int)(name - a->cfg_path), a->cfg_path);
+        songs_load(list);
+    }
 #ifdef __SWITCH__
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
@@ -807,6 +951,8 @@ int main(int argc, char **argv)
             if (shot_page >= 0) a->page = shot_page;
         }
         else if (!strcmp(scene, "controls")) ui_go(a, SC_CONTROLS);
+        else if (!strcmp(scene, "settings")) ui_go(a, SC_SETTINGS);
+        else if (!strcmp(scene, "songs")) { a->online_sel = shot_online; ui_open_songs(a); }
         else if (!strcmp(scene, "online") || !strcmp(scene, "level")) {
             ui_go(a, !strcmp(scene, "level") ? SC_LEVEL : SC_ONLINE);
             a->online_sel = shot_online;
@@ -847,6 +993,11 @@ int main(int argc, char **argv)
     Uint64 rt_start = 0;
     if (rttest_level >= 0) {
         if (start_level(a, rttest_level) != 0) return 1;
+        if (rt_intro) {
+            a->intro = LEVEL_INTRO;
+            audio_volume(a->cfg.music / 100.0f);
+            play_effect(a, SFX_PLAY);
+        }
         rt_start = SDL_GetPerformanceCounter();
     }
     // --bot "all" | "1,4,7-9": watch the look-ahead bot play levels in the window
@@ -864,6 +1015,12 @@ int main(int argc, char **argv)
             } else s++;
         }
         printf("bot: %d level(s)\n", bot_n);
+    }
+    // sound only when playing with a window of one's own (not for the tour, tests or the bot)
+    const int sound = !bot_spec;
+    if (sound) {
+        audio_volume(a->cfg.music / 100.0f);
+        audio_sfx_volume(a->cfg.sfx / 100.0f);
     }
     Uint64 last = SDL_GetPerformanceCounter();
     float dt_smooth = 1.0f / 60.0f;
@@ -894,6 +1051,8 @@ int main(int argc, char **argv)
         last = now;
         // Frame times jitter a little; smoothing them keeps the motion even.
         if (dt > 0.25f) dt = 0.25f;
+        // loading a level takes a while; the attempt and its song start together after that
+        if (a->hitch) { dt = 1.0f / 60.0f; a->hitch = 0; }
         // Use the real elapsed time. (An earlier version smoothed it, which made the game run
         // about 15 % too fast: after every long frame the filter decayed slowly and added time.)
         dt_smooth = dt;
@@ -937,15 +1096,25 @@ int main(int argc, char **argv)
             }
             continue;
         }
-        if (a->scene == SC_PLAY && !a->paused) game_update(&a->game, dt_smooth);
+        if (a->scene == SC_PLAY && !a->paused) {
+            if (a->intro > 0) a->intro -= dt_smooth;   // the attempt waits until the level is there
+            else game_update(&a->game, dt_smooth);
+        }
+        if (sound) {
+            audio_volume(a->cfg.music / 100.0f);
+            audio_sfx_volume(a->cfg.sfx / 100.0f);
+            music_update(a);
+        }
         render(a);
-        if (rttest_level >= 0 && a->game.p.dead) {
+        if (rttest_level >= 0 && rt_secs > 0 && a->dbg_sum_dt >= rt_secs) break;
+        if (rttest_level >= 0 && rt_secs <= 0 && a->game.p.dead) {
             double wall = (double)(SDL_GetPerformanceCounter() - rt_start) / (double)SDL_GetPerformanceFrequency();
             printf("rttest: died at x=%.1f after %.3f s wall clock (game time %.3f s) -> %.1f units/s\n", a->game.p.x, wall, a->game.time, a->game.p.x / wall);
             printf("rttest: frames=%d sum(dt)=%.3f s sum(dt_smooth)=%.3f s\n", a->dbg_frames, a->dbg_sum_dt, a->dbg_sum_ds);
             break;
         }
     }
+    audio_quit();
     config_save(&a->cfg, a->cfg_path);
     if (a->game_loaded) game_free(&a->game);
     gfx_quit(&a->g);

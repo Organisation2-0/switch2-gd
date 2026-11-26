@@ -5,23 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aio.h"
 #include "level.h"
-
-static char *read_all(const char *path, size_t *n)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    const long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *b = sz > 0 && sz < (256L << 20) ? malloc((size_t)sz + 1) : NULL;
-    if (b) {
-        *n = fread(b, 1, (size_t)sz, f);
-        b[*n] = 0;
-    }
-    fclose(f);
-    return b;
-}
 
 // First occurrence of s that starts before `to`.
 static const char *find(const char *from, const char *to, const char *s)
@@ -112,7 +97,7 @@ int gd_info_file(const char *path, GdLevelInfo *out)
     memset(out, 0, sizeof *out);
     out->length = -1;
     size_t n = 0;
-    char *raw = read_all(path, &n);
+    char *raw = (char *)aio_level_file(path, &n);
     if (!raw) return -1;
     char *xml = level_xml(raw, n);
     if (!xml) return -1;
@@ -136,7 +121,7 @@ int gd_saved_load(const char *path, GdSavedLevel **out)
 {
     *out = NULL;
     size_t n = 0;
-    char *raw = read_all(path, &n);
+    char *raw = (char *)gd_read_file(path, &n);
     if (!raw) return 0;
     char *xml = raw;
     if (raw[0] != '<') {   // as stored on Windows: every byte xor 11, then base64 and gzip
@@ -211,7 +196,7 @@ int gd_saved_export(const GdSavedLevel *list, int n, const char *dir)
         const GdLevelInfo *l = &list[i].info;
         char path[700];
         snprintf(path, sizeof path, "%s/%d.gdlvl", dir, l->id);
-        FILE *f = fopen(path, "wb");
+        FILE *f = gd_fopen(path, "wb");
         if (!f) continue;
         fputs("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>", f);
         fprintf(f, "<k>k1</k><i>%d</i><k>k2</k><s>", l->id);
