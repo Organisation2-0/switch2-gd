@@ -13,7 +13,7 @@ sprites, fonts and levels from **your own copy** of Geometry Dash (Steam).
 
 From the [latest release](https://github.com/Organisation2-0/ounce-dash/releases/latest):
 
-- **Windows:** `ounce-dash-1.0.0-windows.zip`. Unpack it and start `ounce-dash.exe`; it finds Geometry
+- **Windows:** `ounce-dash-x.x.x-windows.zip`. Unpack it and start `ounce-dash.exe`; it finds Geometry
   Dash in the default Steam folder (otherwise see *Build and run (Windows)*).
 - **Switch 2:** `ounce-dash.nro`. Put it next to `prepare-sd.ps1` from this repository and follow
   *Build and run (Switch 2)*.
