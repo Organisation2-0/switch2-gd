@@ -6,5 +6,6 @@ build/
 *.o
 *.d
 gd-levels/
+ounce-dash-levels/
 *.png
 !docs/*.png

@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,34 @@ void config_defaults(Config *c)
     c->col2 = palette_nearest(0, 255, 255);
     c->music = c->sfx = 100;
     snprintf(c->name, sizeof c->name, "Player");
+    c->height = 720;
+    c->vsync = 1;
+    c->fps = 60;
+    c->fullscreen = c->show_fps = 0;
+    c->glow = c->particles = c->shake = 1;
+}
+
+// the graphics settings with their names in the file and the values they can take
+static const struct { const char *key; size_t at; int lo, hi; } k_graphics[] = {
+    {"height", offsetof(Config, height), 720, 2160},   {"fullscreen", offsetof(Config, fullscreen), 0, 1},
+    {"vsync", offsetof(Config, vsync), 0, 1},          {"fps", offsetof(Config, fps), 60, 120},
+    {"show_fps", offsetof(Config, show_fps), 0, 1},    {"glow", offsetof(Config, glow), 0, 1},
+    {"particles", offsetof(Config, particles), 0, 1},  {"shake", offsetof(Config, shake), 0, 1}};
+#define GRAPHICS_COUNT ((int)(sizeof k_graphics / sizeof k_graphics[0]))
+
+static int *graphics_value(const Config *c, int i) { return (int *)((const char *)c + k_graphics[i].at); }
+
+// 1 if the line was a graphics setting
+static int load_graphics(Config *c, const char *line)
+{
+    for (int i = 0; i < GRAPHICS_COUNT; i++) {
+        const size_t n = strlen(k_graphics[i].key);
+        if (strncmp(line, k_graphics[i].key, n) || line[n] != '=') continue;
+        const int v = atoi(line + n + 1);
+        *graphics_value(c, i) = v < k_graphics[i].lo ? k_graphics[i].lo : v > k_graphics[i].hi ? k_graphics[i].hi : v;
+        return 1;
+    }
+    return 0;
 }
 
 int config_save(const Config *c, const char *path)
@@ -57,6 +86,7 @@ int config_save(const Config *c, const char *path)
     }
     fprintf(f, "name=%s\n", c->name);
     fprintf(f, "music=%d\nsfx=%d\n", c->music, c->sfx);
+    for (int i = 0; i < GRAPHICS_COUNT; i++) fprintf(f, "%s=%d\n", k_graphics[i].key, *graphics_value(c, i));
     for (int i = 0; i < ACT_COUNT; i++)
         fprintf(f, "bind_%d=%d,%d,%d,%d\n", i, c->bind[i].key[0], c->bind[i].key[1], c->bind[i].joy[0],
                 c->bind[i].joy[1]);
@@ -79,6 +109,7 @@ int config_load(Config *c, const char *path)
             if (!strncmp(line, k_icon_keys[icon], n) && line[n] == '=') break;
         }
         if (icon < IC_COUNT) c->icon[icon] = atoi(strchr(line, '=') + 1);
+        else if (load_graphics(c, line)) continue;
         else if (sscanf(line, "col%d=%d", &idx, &v[0]) == 2 && (idx == 1 || idx == 2)) {   // old files
             float rgb[3];
             old_colour(v[0], rgb);

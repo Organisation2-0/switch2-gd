@@ -15,6 +15,7 @@
 #endif
 
 #include "app.h"
+#include "coins.h"
 #include "audio.h"
 
 // ------------------------------------------------------------ primitives
@@ -268,7 +269,7 @@ static void draw_title(App *a)
     title_runner(a);
     menu_ground(a, 90.0f, C(c.r * 0.72f, c.g * 0.72f, c.b * 0.72f, 1), a->t * 311.6f);
 
-    spr(a, "GJ_logo_001.png", mid, 270.0f, 1.0f, WHITE, 0);
+    label(a, &a->gold, "Ounce Dash", mid, 266.0f, 2.1f, 1, WHITE, W - 90.0f);
     spr_button(a, "GJ_closeBtn_001.png", 18.0f, 302.0f, 0.72f, H_QUIT, 0, 0);
     spr_button(a, "GJ_playBtn_001.png", mid, 170.0f, 1.0f, H_PLAY, 0, 0);
     spr_button(a, "GJ_garageBtn_001.png", mid - 110.0f, 170.0f, 1.0f, H_GARAGE, 0, 0);
@@ -279,6 +280,19 @@ static void draw_title(App *a)
 }
 
 // ------------------------------------------------------------ level select (official levels)
+
+// The coins of a level in a row around (x,y): gold or silver ones for those owned, grey for the rest.
+static void coin_marks(App *a, const LevelEntry *e, int count, float x, float y, float scale)
+{
+    char key[SONG_NAME + 8];
+    level_coin_key(e, key, sizeof key);
+    const int owned = coins_owned(key);
+    for (int k = 0; k < count && k < GD_MAX_COINS; k++) {
+        const char *name = !((owned >> k) & 1) ? "GJ_coinsIcon_gray_001.png"
+                           : e->official ? "GJ_coinsIcon_001.png" : "GJ_coinsIcon2_001.png";
+        spr(a, name, x + (k - (count - 1) * 0.5f) * 25.0f * scale, y, scale, WHITE, 0);
+    }
+}
 
 static void draw_select(App *a)
 {
@@ -310,8 +324,11 @@ static void draw_select(App *a)
         spr(a, "GJ_starsIcon_001.png", mid + 155.0f, 255.0f, 0.8f, WHITE, 0);
         label(a, &a->big, s, mid + 143.0f, 254.0f, 0.6f, 2, C(255, 230, 40, 1), 0);
     }
+    coin_marks(a, e, GD_MAX_COINS, mid + 134.0f, 186.0f, 0.9f);   // every official level has three
     label(a, &a->big, "Normal Mode", mid, 149.0f, 0.5f, 1, WHITE, 0);
     bar(a, mid, 130.0f, 340.0f, e->best, C(0, 255, 0, 1));
+    label(a, &a->big, "Practice Mode", mid, 99.0f, 0.5f, 1, WHITE, 0);
+    bar(a, mid, 80.0f, 340.0f, e->practice, C(0, 255, 255, 1));
     const float step = a->nofficial > 1 ? fminf(16.0f, (W - 60.0f) / (a->nofficial - 1)) : 16.0f;
     for (int i = 0; i < a->nofficial && a->dot.tex; i++) {
         const float p = pt_scale(a), x = mid + (i - (a->nofficial - 1) * 0.5f) * step, d = 8.0f;
@@ -526,6 +543,11 @@ static void draw_level(App *a)
         spr(a, "GJ_starsIcon_001.png", mid - 90.0f, 183.0f, 0.65f, WHITE, 0);
     }
     spr_button(a, "GJ_playBtn2_001.png", mid, 211.0f, 0.95f, H_START, 0, 0);
+    {   // known once the level has been finished
+        char key[SONG_NAME + 8];
+        level_coin_key(e, key, sizeof key);
+        coin_marks(a, e, coins_count(key), mid, 255.0f, 0.75f);
+    }
     char s[24];
     if (l->has_stats) {
         short_number(l->downloads, s, sizeof s);
@@ -539,8 +561,10 @@ static void draw_level(App *a)
         spr(a, "GJ_timeIcon_001.png", mid + 91.0f, 181.0f, 1.0f, WHITE, 0);
         label(a, &a->big, k_length[l->length], mid + 112.0f, 181.0f, 0.6f, 0, WHITE, 70.0f);
     }
-    label(a, &a->big, "Normal Mode", mid, 150.0f, 0.5f, 1, WHITE, 0);
-    bar(a, mid, 136.0f, 238.0f, e->best, C(0, 255, 0, 1));
+    label(a, &a->big, "Normal Mode", mid, 152.0f, 0.5f, 1, WHITE, 0);
+    bar(a, mid, 137.0f, 238.0f, e->best, C(0, 255, 0, 1));
+    label(a, &a->big, "Practice Mode", mid, 119.0f, 0.5f, 1, WHITE, 0);
+    bar(a, mid, 104.0f, 238.0f, e->practice, C(0, 255, 255, 1));
 
     // the song, where the original shows it
     char title[SONG_NAME], kind[32];
@@ -624,11 +648,110 @@ static void draw_settings(App *a)
     a->nhot = 0;
     box(a, mid - 176.0f, LIST_BOTTOM, 352.0f, LIST_TOP - LIST_BOTTOM, C(0, 0, 0, 0.6f));
     table_frame(a, "Settings");
-    text_button(a, &a->green_btn, &a->gold, "Keys", mid, 212.0f, 150.0f, 30.0f, 0.85f, H_KEYS, 0, WHITE);
+    text_button(a, &a->green_btn, &a->gold, "Keys", mid - 82.0f, 212.0f, 140.0f, 30.0f, 0.85f, H_KEYS, 0, WHITE);
+    text_button(a, &a->green_btn, &a->gold, "Graphics", mid + 82.0f, 212.0f, 140.0f, 30.0f, 0.85f, H_GRAPHICS, 0,
+                WHITE);
     label(a, &a->big, "Music", mid, 140.0f, 0.7f, 1, WHITE, 0);
     volume_slider(a, 0, mid - 104.0f, mid + 104.0f, 117.0f);
     label(a, &a->big, "SFX", mid, 92.0f, 0.7f, 1, WHITE, 0);
     volume_slider(a, 1, mid - 104.0f, mid + 104.0f, 69.0f);
+    spr_button(a, "GJ_arrow_03_001.png", 24.0f, 297.0f, 1.0f, H_BACK, 0, 0);
+}
+
+// ------------------------------------------------------------ graphics
+
+enum { OPT_RESOLUTION, OPT_FULLSCREEN, OPT_VSYNC, OPT_FPS, OPT_SHOW_FPS, OPT_GLOW, OPT_PARTICLES, OPT_SHAKE };
+
+// the rows of the menu: the Switch 2 always fills its screen, the PC follows its monitor's rate
+#ifdef __SWITCH__
+static const int k_options[] = {OPT_RESOLUTION, OPT_VSYNC, OPT_FPS, OPT_SHOW_FPS, OPT_GLOW, OPT_PARTICLES, OPT_SHAKE};
+static const int k_heights[] = {720, 1080, 1440, 2160};
+#else
+static const int k_options[] = {OPT_RESOLUTION, OPT_FULLSCREEN, OPT_VSYNC, OPT_SHOW_FPS, OPT_GLOW, OPT_PARTICLES,
+                                OPT_SHAKE};
+static const int k_heights[] = {720, 900, 1080, 1440, 2160};
+#endif
+#define OPTION_COUNT ((int)(sizeof k_options / sizeof k_options[0]))
+#define HEIGHT_COUNT ((int)(sizeof k_heights / sizeof k_heights[0]))
+
+static int is_fullscreen(const App *a) { return a->cfg.fullscreen || a->fullscreen_arg; }
+
+// the setting behind an on / off row, else NULL
+static int *option_switch(App *a, int opt)
+{
+    switch (opt) {
+    case OPT_VSYNC: return &a->cfg.vsync;
+    case OPT_SHOW_FPS: return &a->cfg.show_fps;
+    case OPT_GLOW: return &a->cfg.glow;
+    case OPT_PARTICLES: return &a->cfg.particles;
+    case OPT_SHAKE: return &a->cfg.shake;
+    default: return NULL;
+    }
+}
+
+// next (dir 1) or previous (dir -1) value of a row
+static void option_step(App *a, int opt, int dir)
+{
+    int *on = option_switch(a, opt);
+    if (on) *on = !*on;
+    else if (opt == OPT_FPS) a->cfg.fps = a->cfg.fps == 120 ? 60 : 120;
+    else if (opt == OPT_FULLSCREEN) {
+        a->cfg.fullscreen = !is_fullscreen(a);
+        a->fullscreen_arg = 0;
+    } else {
+#ifndef __SWITCH__
+        if (is_fullscreen(a)) return;   // the size is the screen's
+#endif
+        int n = 1, at = 0;   // how many of the sizes fit this screen, and the present one
+        while (n < HEIGHT_COUNT && k_heights[n] <= gfx_max_height(&a->g)) n++;
+        for (int i = 1; i < n; i++)
+            if (k_heights[i] <= a->cfg.height) at = i;
+        a->cfg.height = k_heights[(at + dir + n) % n];
+    }
+    apply_graphics(a);
+    config_save(&a->cfg, a->cfg_path);
+}
+
+static void draw_graphics(App *a)
+{
+    static const struct { const char *name, *hint; } k_text[] = {
+        {"Resolution", "Higher: smoother edges, more work for the graphics chip"},
+        {"Fullscreen", "Fills the whole screen"},
+        {"VSync", "Off: less input delay, uses more power"},
+        {"Frame Rate", "120 needs a screen that can do 120 Hz"},
+        {"FPS Counter", "Shown in the lower left corner"},
+        {"Glow", "The glow around objects"},
+        {"Particles", "Sparks and dust of the icon, orbs and portals"},
+        {"Screen Shake", "The camera shaking in some levels"}};
+    const float W = pt_width(a), mid = W * 0.5f;
+    gradient(a, C(0, 102, 255, 1));
+    bottom_corners(a);
+    box(a, mid - 176.0f, LIST_BOTTOM, 352.0f, LIST_TOP - LIST_BOTTOM, C(0, 0, 0, 0.6f));
+    table_frame(a, "Graphics");
+    const char *hint = "";
+    for (int i = 0; i < OPTION_COUNT; i++) {
+        const int opt = k_options[i];
+        const float y = LIST_TOP - 20.0f - i * 29.0f;
+        const int *on = option_switch(a, opt);
+        char value[24];
+        int lit = 1;
+        if (on) lit = *on;
+        else if (opt == OPT_FULLSCREEN) lit = is_fullscreen(a);
+        if (opt == OPT_FPS) snprintf(value, sizeof value, "%d FPS", a->cfg.fps);
+        else if (opt != OPT_RESOLUTION) snprintf(value, sizeof value, "%s", lit ? "On" : "Off");
+#ifndef __SWITCH__
+        else if (is_fullscreen(a)) { snprintf(value, sizeof value, "Screen"); lit = 0; }
+#endif
+        else snprintf(value, sizeof value, "%d x %d", a->cfg.height * 16 / 9, a->cfg.height);
+        label(a, &a->big, k_text[opt].name, mid - 158.0f, y, 0.55f, 0, WHITE, 160.0f);
+        text_button(a, lit ? &a->green_btn : &a->grey_btn, &a->big, value, mid + 92.0f, y, 132.0f, 23.0f, 0.5f,
+                    H_OPTION, opt, WHITE);
+        if (focused(a, H_OPTION, opt)) hint = k_text[opt].hint;
+    }
+#ifdef __SWITCH__
+    if (a->cfg.height != a->g.h) hint = "The new resolution is used at the next start";
+#endif
+    label(a, &a->gold, hint, mid, 17.0f, 0.45f, 1, WHITE, W - 150.0f);
     spr_button(a, "GJ_arrow_03_001.png", 24.0f, 297.0f, 1.0f, H_BACK, 0, 0);
 }
 
@@ -820,14 +943,25 @@ void ui_draw_pause(App *a)
     a->nhot = 0;
     panel(a, &a->dark, 10.0f, 10.0f, W - 20.0f, 300.0f, 0, C(0, 0, 0, 0.75f));
     label(a, &a->big, gm->name, mid, 288.0f, 0.8f, 1, WHITE, W - 120.0f);
-    char s[64];
-    snprintf(s, sizeof s, "Best: %d%%", (int)gm->best_percent);
-    label(a, &a->gold, s, mid, 253.0f, 0.5f, 1, WHITE, 0);
-    label(a, &a->big, "Normal Mode", mid, 235.0f, 0.5f, 1, WHITE, 0);
-    bar(a, mid, 215.0f, 340.0f, gm->percent, C(0, 255, 0, 1));
-    spr_button(a, "GJ_menuBtn_001.png", mid - 85.0f, 130.0f, 0.92f, H_MENU, 0, 0);
-    spr_button(a, "GJ_playBtn2_001.png", mid, 130.0f, 1.0f, H_RESUME, 0, 0);
-    spr_button(a, "GJ_replayBtn_001.png", mid + 85.0f, 130.0f, 0.92f, H_RESTART, 0, 0);
+    // the best of both modes; the running one counts at once
+    const LevelEntry *e = &a->levels[a->cur];
+    const float normal = a->practice ? e->best : fmaxf(e->best, gm->best_percent);
+    const float practice = a->practice ? fmaxf(e->practice, gm->best_percent) : e->practice;
+    label(a, &a->big, "Normal Mode", mid, 254.0f, 0.5f, 1, WHITE, 0);
+    bar(a, mid, 236.0f, 340.0f, normal, C(0, 255, 0, 1));
+    label(a, &a->big, "Practice Mode", mid, 208.0f, 0.5f, 1, WHITE, 0);
+    bar(a, mid, 190.0f, 340.0f, practice, C(0, 255, 255, 1));
+    for (int k = 0; k < gm->ncoins; k++) {   // picked up now, owned from before, or missing
+        const char *state = (game_coins(gm) >> k) & 1 ? "on" : (gm->coins_owned >> k) & 1 ? "collected" : "off";
+        char name[48];
+        snprintf(name, sizeof name, "gjCoinUI_%02d_%s_001.png", gm->obj[gm->coin_obj[k]].id == 1329 ? 2 : 1, state);
+        spr(a, name, mid + (k - (gm->ncoins - 1) * 0.5f) * 20.0f, 172.5f, 0.56f, WHITE, 0);
+    }
+    spr_button(a, a->practice ? "GJ_normalBtn_001.png" : "GJ_practiceBtn_001.png", mid - 123.0f, 128.0f, 0.92f,
+               H_PRACTICE, 0, 0);
+    spr_button(a, "GJ_playBtn2_001.png", mid - 38.0f, 128.0f, 1.0f, H_RESUME, 0, 0);
+    spr_button(a, "GJ_menuBtn_001.png", mid + 47.0f, 128.0f, 0.92f, H_MENU, 0, 0);
+    spr_button(a, "GJ_replayBtn_001.png", mid + 123.0f, 128.0f, 0.92f, H_RESTART, 0, 0);
     spr(a, "gj_songIcon_001.png", mid - 191.0f, 70.0f, 0.8f, WHITE, 0);
     volume_slider(a, 0, mid - 173.0f, mid - 27.0f, 70.0f);
     spr(a, "GJ_sfxIcon_001.png", mid + 10.0f, 70.0f, 0.8f, WHITE, 0);
@@ -841,18 +975,37 @@ void ui_draw_complete(App *a)
     a->nhot = 0;
     dim(a, 100.0f / 255.0f);
     panel(a, &a->dark, mid - 190.0f, 45.0f, 380.0f, 235.0f, 0, C(0, 0, 0, 180.0f / 255.0f));
-    spr(a, "GJ_levelComplete_001.png", mid, 250.0f, 0.8f, WHITE, 0);
+    if (a->practice) label(a, &a->gold, "Practice Complete", mid, 250.0f, 1.1f, 1, WHITE, 300.0f);
+    else spr(a, "GJ_levelComplete_001.png", mid, 250.0f, 0.8f, WHITE, 0);
     char s[64];
+    const int coins = gm->ncoins > 0;   // with coins the lines move together to make room
     snprintf(s, sizeof s, "Attempts: %d", gm->attempts);
-    label(a, &a->gold, s, mid, 200.0f, 0.8f, 1, WHITE, 0);
+    label(a, &a->gold, s, mid, coins ? 211.0f : 200.0f, coins ? 0.7f : 0.8f, 1, WHITE, 0);
     snprintf(s, sizeof s, "Jumps: %d", gm->jumps);
-    label(a, &a->gold, s, mid, 175.0f, 0.8f, 1, WHITE, 0);
+    label(a, &a->gold, s, mid, coins ? 191.0f : 175.0f, coins ? 0.7f : 0.8f, 1, WHITE, 0);
     const int sec = (int)gm->time;
     snprintf(s, sizeof s, "Time: %02d:%02d", sec / 60, sec % 60);
-    label(a, &a->gold, s, mid, 150.0f, 0.8f, 1, WHITE, 0);
-    label(a, &a->big, "Awesome!", mid, 112.0f, 0.8f, 1, WHITE, 0);
+    label(a, &a->gold, s, mid, coins ? 171.0f : 150.0f, coins ? 0.7f : 0.8f, 1, WHITE, 0);
+    // practice mode keeps no coins, so there only the owned ones are filled
+    const int have = gm->coins_owned | (a->practice ? 0 : game_coins(gm));
+    for (int k = 0; k < gm->ncoins; k++) {
+        const int user = gm->obj[gm->coin_obj[k]].id == 1329;
+        const char *name = (have >> k) & 1 ? user ? "secretCoinUI2_001.png" : "secretCoinUI_001.png"
+                           : user ? "secretCoin_2_b_01_001.png" : "secretCoin_b_01_001.png";
+        spr(a, name, mid + (k - (gm->ncoins - 1) * 0.5f) * 50.0f, 135.0f, 0.85f, WHITE, 0);
+    }
+    label(a, &a->big, "Awesome!", mid, coins ? 99.0f : 112.0f, coins ? 0.7f : 0.8f, 1, WHITE, 0);
     spr_button(a, "GJ_replayBtn_001.png", mid - 95.0f, 52.0f, 1.0f, H_RESTART, 0, 0);
     spr_button(a, "GJ_menuBtn_001.png", mid + 95.0f, 52.0f, 1.0f, H_MENU, 0, 0);
+}
+
+// Set and remove checkpoints (also Z / X on the keyboard, ZR / ZL on the controller).
+void ui_draw_checkpoint_buttons(App *a)
+{
+    const float mid = pt_width(a) * 0.5f;
+    a->nhot = 0;
+    spr_button(a, "GJ_checkpointBtn_001.png", mid - 36.0f, 32.0f, 0.9f, H_CP_ADD, 0, 0);
+    spr_button(a, "GJ_removeCheckBtn_001.png", mid + 36.0f, 32.0f, 0.9f, H_CP_DEL, 0, 0);
 }
 
 void ui_draw(App *a)
@@ -869,6 +1022,7 @@ void ui_draw(App *a)
     case SC_LEVEL: draw_level(a); break;
     case SC_SETTINGS: draw_settings(a); break;
     case SC_SONGS: draw_songs(a); break;
+    case SC_GRAPHICS: draw_graphics(a); break;
     case SC_PLAY: break;
     }
 }
@@ -907,6 +1061,7 @@ static void default_focus(App *a)
         break;
     case SC_CONTROLS: a->focus_id = H_BIND; break;
     case SC_SETTINGS: a->focus_id = H_KEYS; break;
+    case SC_GRAPHICS: a->focus_id = H_OPTION; a->focus_arg = OPT_RESOLUTION; break;
     case SC_LEVEL: a->focus_id = H_START; break;
     case SC_PLAY: a->focus_id = a->game.finished ? H_RESTART : H_RESUME; break;
     default: a->focus_id = H_NONE; break;
@@ -949,6 +1104,11 @@ static void back(App *a)
     case SC_SONGS:
         a->preview[0] = 0;
         ui_go(a, SC_LEVEL);
+        break;
+    case SC_GRAPHICS:
+        save_config(a);
+        ui_go(a, SC_SETTINGS);
+        a->focus_id = H_GRAPHICS;
         break;
     case SC_GARAGE:
         save_config(a);
@@ -1040,6 +1200,8 @@ static void activate(App *a, int id, int arg)
     case H_ONLINE: ui_go(a, SC_ONLINE); list_follow(a); break;
     case H_SETTINGS: ui_go(a, SC_SETTINGS); break;
     case H_KEYS: ui_go(a, SC_CONTROLS); break;
+    case H_GRAPHICS: ui_go(a, SC_GRAPHICS); break;
+    case H_OPTION: option_step(a, arg, 1); break;
     case H_SONG: ui_open_songs(a); break;
     case H_SONGROW: choose_song(a, arg); break;
     case H_QUIT: a->quit = 1; break;
@@ -1049,6 +1211,9 @@ static void activate(App *a, int id, int arg)
     case H_PAGEDOT: a->sel = arg; break;
     case H_CARD: play(a, a->sel); break;
     case H_RESUME: a->paused = 0; break;
+    case H_PRACTICE: practice_toggle(a); break;
+    case H_CP_ADD: practice_place(a); break;
+    case H_CP_DEL: practice_remove(a); break;
     case H_RESTART: restart(a); break;
     case H_MENU: leave_level(a); break;
     case H_TAB: show_tab(a, arg); break;
@@ -1082,6 +1247,7 @@ static void confirm(App *a)
         else activate(a, H_START, 0);
         break;
     case SC_SONGS: choose_song(a, a->song_sel); break;
+    case SC_GRAPHICS:   // the first press only shows which row is chosen
     case SC_GARAGE:
         if (!a->show_focus) { a->show_focus = 1; default_focus(a); }
         else activate(a, a->focus_id, a->focus_arg);
@@ -1109,6 +1275,11 @@ static void navigate(App *a, int dx, int dy)
     if (dx && a->show_focus && a->focus_id == H_VOLUME) {
         set_volume(a, a->focus_arg, (a->focus_arg ? a->cfg.sfx : a->cfg.music) + 10 * dx);
         save_config(a);
+        return;
+    }
+    // ... and change the value of a row in the graphics menu
+    if (dx && a->show_focus && a->focus_id == H_OPTION) {
+        option_step(a, a->focus_arg, dx);
         return;
     }
     // in the pause menu the two sliders stand side by side: down / up go from one to the other
@@ -1147,13 +1318,19 @@ static void navigate(App *a, int dx, int dy)
     if (best) { a->focus_id = best->id; a->focus_arg = best->arg; }
 }
 
+// the clickable area at a screen position, the one drawn last first
+static const Hot *hot_at(const App *a, float x, float y)
+{
+    for (int i = a->nhot - 1; i >= 0; i--) {
+        const Rect r = a->hot[i].r;
+        if (x >= r.x - r.w / 2 && x <= r.x + r.w / 2 && y >= r.y - r.h / 2 && y <= r.y + r.h / 2) return &a->hot[i];
+    }
+    return NULL;
+}
+
 static void click(App *a, float x, float y, int right)
 {
-    const Hot *hit = NULL;
-    for (int i = a->nhot - 1; i >= 0 && !hit; i--) {
-        const Rect r = a->hot[i].r;
-        if (x >= r.x - r.w / 2 && x <= r.x + r.w / 2 && y >= r.y - r.h / 2 && y <= r.y + r.h / 2) hit = &a->hot[i];
-    }
+    const Hot *hit = hot_at(a, x, y);
     if (a->capturing) { a->capturing = 0; return; }
     if (!hit) return;
     const int id = hit->id, arg = hit->arg;
@@ -1163,6 +1340,10 @@ static void click(App *a, float x, float y, int right)
     if (id == H_SWATCH && right) {   // right click: the second colour
         a->cfg.col2 = arg;
         save_config(a);
+        return;
+    }
+    if (id == H_OPTION && right) {   // right click: the previous value
+        option_step(a, arg, -1);
         return;
     }
     if (id == H_VOLUME) {   // jumps to the click and follows the mouse
@@ -1177,6 +1358,118 @@ static void click(App *a, float x, float y, int right)
 // ------------------------------------------------------------ input
 
 static int playing(const App *a) { return a->scene == SC_PLAY && !a->paused && !a->game.finished; }
+
+// The checkpoint button of practice mode at a screen position, or H_NONE.
+static int checkpoint_button(const App *a, float x, float y)
+{
+    for (int i = 0; i < a->nhot; i++) {
+        const Rect r = a->hot[i].r;
+        if ((a->hot[i].id == H_CP_ADD || a->hot[i].id == H_CP_DEL) && x >= r.x - r.w / 2 && x <= r.x + r.w / 2 &&
+            y >= r.y - r.h / 2 && y <= r.y + r.h / 2)
+            return a->hot[i].id;
+    }
+    return H_NONE;
+}
+
+// ------------------------------------------------------------ touch
+//
+// In the level a finger acts the moment it touches. In the menus a button reacts when the finger is
+// lifted again without having moved, so that lists can be dragged and pages swiped.
+
+#define TOUCH_SLOP 24.0f     // px a finger may wander and still tap
+#define TOUCH_SWIPE 100.0f   // px sideways that turn a page
+
+enum { FINGER_JUMP, FINGER_TAP, FINGER_DRAG, FINGER_SLIDER, FINGER_USED };
+
+static int same_screen(const App *a, const Touch *t)
+{
+    return t->scene == a->scene && t->paused == a->paused && t->colors == a->colors;
+}
+
+static void touch_down(App *a, Touch *t)
+{
+    t->mode = FINGER_USED;
+    if (playing(a)) {
+        if (t->x > a->lw - 100 && t->y < 100) { pause_game(a, 1); return; }   // the pause button
+        const int button = a->practice ? checkpoint_button(a, t->x, t->y) : H_NONE;
+        if (button) { activate(a, button, 0); return; }
+        t->mode = FINGER_JUMP;
+        if (a->game.input) game_set_hold(&a->game, 0);   // a second finger clicks again
+        game_set_hold(&a->game, 1);
+        return;
+    }
+    const Hot *hit = hot_at(a, t->x, t->y);
+    if (hit && hit->id == H_VOLUME && !a->capturing) {
+        t->mode = FINGER_SLIDER;
+        t->slider = hit->arg;
+        click(a, t->x, t->y, 0);
+        return;
+    }
+    t->mode = FINGER_TAP;
+}
+
+static void touch_move(App *a, Touch *t, float x, float y)
+{
+    float dy = y - t->y;
+    t->x = x;
+    t->y = y;
+    if (t->mode == FINGER_SLIDER) {
+        if (same_screen(a, t)) slide_to(a, t->slider, x);
+        return;
+    }
+    if (t->mode == FINGER_TAP && (fabsf(x - t->x0) > TOUCH_SLOP || fabsf(y - t->y0) > TOUCH_SLOP)) {
+        t->mode = FINGER_DRAG;
+        dy = y - t->y0;
+    }
+    if (t->mode != FINGER_DRAG || !same_screen(a, t)) return;
+    // the lists follow the finger
+    if (a->scene == SC_ONLINE) {
+        a->show_focus = 0;
+        a->scroll = fminf(fmaxf(a->scroll - dy / pt_scale(a), 0.0f), list_limit(a));
+    } else if (a->scene == SC_SONGS) {
+        a->show_focus = 0;
+        a->song_scroll = fminf(fmaxf(a->song_scroll - dy / pt_scale(a), 0.0f), song_limit(a));
+    }
+}
+
+static void touch_up(App *a, Touch *t)
+{
+    t->active = 0;
+    if (t->mode == FINGER_JUMP) {   // the jump button is let go with the last finger
+        for (int i = 0; i < MAX_TOUCH; i++)
+            if (a->touch[i].active && a->touch[i].mode == FINGER_JUMP) return;
+        if (a->scene == SC_PLAY) game_set_hold(&a->game, 0);
+    } else if (t->mode == FINGER_SLIDER) {
+        a->dragging = 0;
+        save_config(a);
+    } else if (t->mode == FINGER_TAP && same_screen(a, t)) {
+        click(a, t->x0, t->y0, 0);
+    } else if (t->mode == FINGER_DRAG && same_screen(a, t)) {
+        const float dx = t->x - t->x0;
+        if (fabsf(dx) < TOUCH_SWIPE || fabsf(dx) < fabsf(t->y - t->y0)) return;
+        if (a->scene == SC_SELECT) step_level(a, dx < 0 ? 1 : -1);
+        else if (a->scene == SC_GARAGE && !a->colors) turn_page(a, dx < 0 ? 1 : -1);
+    }
+}
+
+void ui_touch(App *a, int phase, int id, float x, float y)
+{
+    Touch *t = NULL, *spare = NULL;
+    for (int i = 0; i < MAX_TOUCH; i++) {
+        if (a->touch[i].active && a->touch[i].id == id) t = &a->touch[i];
+        else if (!a->touch[i].active && !spare) spare = &a->touch[i];
+    }
+    if (phase == TOUCH_DOWN) {
+        if (!t) t = spare;
+        if (!t) return;
+        *t = (Touch){1, id, FINGER_USED, 0, a->scene, a->paused, a->colors, x, y, x, y};
+        touch_down(a, t);
+    } else if (t && phase == TOUCH_MOVE) {
+        touch_move(a, t, x, y);
+    } else if (t) {
+        touch_up(a, t);
+    }
+}
 
 static void clear_binding(App *a)
 {
@@ -1232,13 +1525,8 @@ static void action_up(App *a, int act)
     if (act == ACT_JUMP && a->scene == SC_PLAY) game_set_hold(&a->game, 0);
 }
 
-static void to_ui(App *a, int px, int py, float *ux, float *uy)
-{
-    int w, h;
-    SDL_GetWindowSize(a->g.win, &w, &h);
-    *ux = px * a->lw / (float)w;
-    *uy = py * a->lh / (float)h;
-}
+// a mouse position in drawing coordinates, whatever the size and shape of the window
+static void to_ui(App *a, int px, int py, float *ux, float *uy) { gfx_window_point(&a->g, px, py, ux, uy); }
 
 void ui_event(App *a, const SDL_Event *e)
 {
@@ -1268,6 +1556,10 @@ void ui_event(App *a, const SDL_Event *e)
             if (sym == SDLK_LEFT) { navigate(a, -1, 0); break; }
             if (sym == SDLK_RIGHT) { navigate(a, 1, 0); break; }
         }
+        if (playing(a) && a->practice && (sym == SDLK_z || sym == SDLK_x)) {
+            activate(a, sym == SDLK_z ? H_CP_ADD : H_CP_DEL, 0);
+            break;
+        }
         int act = config_action_for_key(&a->cfg, sym);
         if (act < 0 && sym == SDLK_ESCAPE) act = ACT_BACK;
         if (act >= 0) action_down(a, act);
@@ -1282,10 +1574,9 @@ void ui_event(App *a, const SDL_Event *e)
         float x, y;
         to_ui(a, e->button.x, e->button.y, &x, &y);
         if (playing(a)) {
-#ifdef __SWITCH__
-            if (x > a->lw - 100 && y < 100) { pause_game(a, 1); break; }
-#endif
-            game_set_hold(&a->game, 1);
+            const int button = a->practice ? checkpoint_button(a, x, y) : H_NONE;
+            if (button) activate(a, button, 0);
+            else game_set_hold(&a->game, 1);
         } else {
             click(a, x, y, e->button.button == SDL_BUTTON_RIGHT);
         }
@@ -1333,6 +1624,10 @@ void ui_event(App *a, const SDL_Event *e)
             // the direction pad always moves around the menus
             if (b == 12 || b == 14) { navigate(a, b == 12 ? -1 : 1, 0); break; }
             if (b == 13 || b == 15) { navigate(a, 0, b == 13 ? -1 : 1); break; }
+        }
+        if (playing(a) && a->practice && (b == 8 || b == 9)) {   // ZR sets a checkpoint, ZL removes it
+            activate(a, b == 9 ? H_CP_ADD : H_CP_DEL, 0);
+            break;
         }
         const int act = config_action_for_joy(&a->cfg, b);
         if (act >= 0) action_down(a, act);

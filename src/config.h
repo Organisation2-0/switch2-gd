@@ -22,6 +22,13 @@ typedef struct {
     int col1, col2;   // palette indices
     int music, sfx;   // volume of music and sound effects, 0..100 (both 0: no sound device)
     char name[24];    // shown under the profile button of the title screen
+    // graphics
+    int height;       // pixel height of the picture, 16:9
+    int fullscreen;   // PC
+    int vsync;
+    int fps;          // Switch 2: 60 or 120
+    int show_fps;     // counter in the corner
+    int glow, particles, shake;   // effects
 } Config;
 
 extern const char *const g_action_names[ACT_COUNT];

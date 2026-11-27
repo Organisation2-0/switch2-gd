@@ -38,14 +38,14 @@ include $(DEVKITPRO)/libounce/switch2_rules
 #   of a homebrew executable (.nro). This is intended to be used for sysmodules.
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
-TARGET		:=	$(notdir $(CURDIR))
+TARGET		:=	ounce-dash
 BUILD		:=	build
 SOURCES		:=	src
 DATA		:=
 INCLUDES	:=	src
-APP_TITLE	:=	Geometry Dash (fan port)
+APP_TITLE	:=	Ounce Dash
 APP_AUTHOR	:=	fan project
-APP_VERSION	:=	1.2.0
+APP_VERSION	:=	1.0.0
 
 #---------------------------------------------------------------------------------
 # options for code generation

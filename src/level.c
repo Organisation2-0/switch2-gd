@@ -136,6 +136,10 @@ static void parse_object(char *rec, GdObject *o)
                 if (*g == '.') g++;
             }
         }
+        if ((key == 442 || key == 430 || key == 145) && !o->text) {
+            o->text = malloc(strlen(tok) + 1);
+            if (o->text) strcpy(o->text, tok);
+        }
         if (key == 57) {
             const char *g = tok;
             while (*g && o->ngroups < GD_MAX_GROUPS) {
@@ -188,6 +192,7 @@ static int parse_levelstring(char *s, GdLevel *out)
         }
         parse_object(rec, &objs[n]);
         if (objs[n].id > 0) n++;
+        else free(objs[n].text);
     }
     out->objects = objs;
     out->count = n;
@@ -250,6 +255,7 @@ int gd_level_load(const char *path, GdLevel *out)
 void gd_level_free(GdLevel *lvl)
 {
     free(lvl->header);
+    for (size_t i = 0; i < lvl->count; i++) free(lvl->objects[i].text);
     free(lvl->objects);
     memset(lvl, 0, sizeof *lvl);
 }

@@ -19,12 +19,28 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $res = Join-Path $Steam 'Resources'
 if (-not (Test-Path $res)) { throw "Resources folder not found: $res" }
 
-$nro = Join-Path $root 'gd-switch2.nro'
-if (-not (Test-Path $nro)) { throw "Build the app first (gd-switch2.nro is missing)." }
+$nro = Join-Path $root 'ounce-dash.nro'
+if (-not (Test-Path $nro)) { throw "Build the app first or download it (ounce-dash.nro is missing)." }
 
-$dest = Join-Path $Sd 'switch\gd'
+$dest = Join-Path $Sd 'switch\ounce-dash'
 $dres = Join-Path $dest 'Resources'
 New-Item -ItemType Directory -Force "$dres\levels", "$dest\levels", "$dest\music" | Out-Null
+
+# Versions before 1.0.0 used switch\gd: settings, songs, coins and levels are copied over from there
+# (what is already in the new folder stays; nothing is deleted).
+$old = Join-Path $Sd 'switch\gd'
+if (Test-Path $old) {
+    $names = @{ 'config.ini' = 'config.ini'; 'gd-songs.ini' = 'ounce-dash-songs.ini'; 'gd-coins.ini' = 'ounce-dash-coins.ini' }
+    foreach ($n in $names.Keys) {
+        if ((Test-Path "$old\$n") -and -not (Test-Path "$dest\$($names[$n])")) { Copy-Item "$old\$n" "$dest\$($names[$n])" }
+    }
+    foreach ($d in 'levels', 'music') {
+        foreach ($f in Get-ChildItem "$old\$d" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'levels.txt' }) {
+            if (-not (Test-Path -LiteralPath "$dest\$d\$($f.Name)")) { Copy-Item -LiteralPath $f.FullName "$dest\$d" }
+        }
+    }
+    Write-Host "Took over settings, songs and levels from switch\gd; that folder and switch\gd-switch2.nro can be deleted."
+}
 
 # Sprite sheets (HD), fonts, backgrounds, ground tiles, level files.
 $patterns = @(
@@ -34,6 +50,7 @@ $patterns = @(
     'GJ_square05-hd.png', 'GJ_button_01-hd.png', 'GJ_button_04-hd.png', 'square02b_001-hd.png',
     'GJ_square01-hd.png', 'slidergroove-hd.png', 'sliderthumb-hd.png',
     'playSound_01.ogg', 'quitSound_01.ogg', 'explode_11.ogg',
+    'StayInsideMe.mp3',   # practice mode
     # the songs of the official levels and the menu music
     'menuLoop.mp3', 'StereoMadness.mp3', 'BackOnTrack.mp3', 'Polargeist.mp3', 'DryOut.mp3', 'BaseAfterBase.mp3',
     'CantLetGo.mp3', 'Jumper.mp3', 'TimeMachine.mp3', 'Cycles.mp3', 'xStep.mp3', 'Clutterfunk.mp3',
@@ -41,6 +58,7 @@ $patterns = @(
     'BlastProcessing.mp3', 'TheoryOfEverything2.mp3', 'GeometricalDominator.mp3', 'Deadlocked.mp3',
     'Fingerdash.mp3', 'Dash.mp3',
     'groundSquare_*_001-hd.png', 'game_bg_*_001-hd.png',
+    'fg_*_001-hd.png',   # middlegrounds
     'GJBeast0?_AnimDesc.plist', 'Robot_AnimDesc.plist', 'Spider_AnimDesc.plist'
 )
 $count = 0
@@ -62,6 +80,16 @@ foreach ($f in Get-ChildItem "$res\icons" -Filter '*-hd.*' -File) {
     $count++
 }
 
+# Sound effects for the sound triggers: those of the game, and those it has downloaded.
+New-Item -ItemType Directory -Force "$dres\sfx" | Out-Null
+$sounds = @(Get-ChildItem "$res\sfx" -Filter 's*.ogg' -File -ErrorAction SilentlyContinue)
+$own = Join-Path $env:LOCALAPPDATA 'GeometryDash'
+$sounds += @(Get-ChildItem $own -Filter 's*.ogg' -File -ErrorAction SilentlyContinue)
+foreach ($f in $sounds | Where-Object { $_.Name -match '^s\d+\.ogg$' }) {
+    Copy-Item $f.FullName "$dres\sfx" -Force
+    $count++
+}
+
 # Your own songs, chosen in the game on the page of a custom level.
 if ($Music -and (Test-Path $Music)) {
     foreach ($f in Get-ChildItem $Music -File | Where-Object { $_.Extension -in '.mp3', '.ogg', '.wav' }) {
@@ -76,14 +104,14 @@ if ($Levels -and (Test-Path $Levels)) {
     }
 }
 if (-not $NoSavedLevels) {
-    $exe = @("$root\build\gd.exe", "$root\gd.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $exe = @("$root\build\ounce-dash.exe", "$root\ounce-dash.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($exe) { & $exe --export-saved "$dest\levels" }
-    else { Write-Warning "gd.exe not found: the levels saved in your game are not copied (run build-pc.ps1)." }
+    else { Write-Warning "ounce-dash.exe not found: the levels saved in your game are not copied (run build-pc.ps1)." }
 }
 $list = @(Get-ChildItem "$dest\levels" -File | Where-Object { $_.Extension -in '.gdlvl', '.aiogdl' } |
-    ForEach-Object { "sdmc:/switch/gd/levels/$($_.Name)" })
+    ForEach-Object { "sdmc:/switch/ounce-dash/levels/$($_.Name)" })
 [System.IO.File]::WriteAllLines("$dest\levels\levels.txt", [string[]]$list)
 
-Copy-Item $nro (Join-Path $Sd 'switch\gd-switch2.nro') -Force
+Copy-Item $nro (Join-Path $Sd 'switch\ounce-dash.nro') -Force
 Write-Host "Copied $count resource files and the app to $Sd"
-Write-Host "Start kaiHEN, open hbmenu (hold R while launching a game) and run 'Geometry Dash (fan port)'."
+Write-Host "Start kaiHEN, open hbmenu (hold R while launching a game) and run 'Ounce Dash'."

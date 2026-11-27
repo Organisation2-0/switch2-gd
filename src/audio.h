@@ -24,4 +24,17 @@ void audio_sfx(int id, const char *path, float gain);
 void audio_sfx_stop(void);
 void audio_quit(void);
 
+// Sounds a level starts itself (sound effect and song triggers).
+typedef struct {
+    float volume, speed;                      // speed in semitone steps
+    float start, end, fade_in, fade_out;      // seconds; end 0: the whole file
+    int loop, id, group;                      // id and group name the sound for later changes
+} AudioVoice;
+void audio_voice_start(const char *path, const AudioVoice *v);
+// Stops the sounds with this id or group (both 0: all of them), or changes their volume over `seconds`.
+void audio_voice_change(int id, int group, int stop, int set_volume, float volume, float seconds);
+void audio_voices_stop(void);
+// Changes the loudness of the music over `seconds` (1 after audio_play).
+void audio_music_gain(float gain, float seconds);
+
 #endif

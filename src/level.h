@@ -28,6 +28,8 @@ typedef struct {
     int groups[GD_MAX_GROUPS];
     short list[16];             // key 152 (random weights) or 435 (sequence): "group.number" pairs
     int nlist;
+    char *text;                 // the one value kept as text: key 442 (spawn remap), 430 (events)
+                                // or 145 (particles); owned, NULL if the object has none
     int nprops;
     GdProp props[GD_MAX_PROPS]; // every key/value pair, for later features
 } GdObject;

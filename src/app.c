@@ -1,9 +1,10 @@
 ﻿// SPDX-License-Identifier: GPL-3.0-or-later
-// Geometry Dash fan port: application, menus and main loop (SDL2).
+// Ounce Dash (a fan-made Geometry Dash engine): application, menus and main loop (SDL2).
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,6 +20,7 @@
 #endif
 #include "aio.h"
 #include "app.h"
+#include "coins.h"
 #include "audio.h"
 #include "bot.h"
 
@@ -40,6 +42,13 @@ static int file_exists(const char *p)
     FILE *f = fopen(p, "rb");
     if (f) fclose(f);
     return f != NULL;
+}
+
+// Files and folders of the versions before 1.0.0 stay in use: the old name holds while only it is there.
+static const char *named(const char *now, const char *before)
+{
+    struct stat s;
+    return stat(now, &s) != 0 && stat(before, &s) == 0 ? before : now;
 }
 
 static LevelEntry *add_level(App *a)
@@ -145,32 +154,108 @@ void apply_skin(App *a)
     game_reset(&a->game);
 }
 
-static void load_bg_images(App *a, const Game *gm)
+static GfxVideo video_settings(const App *a)
+{
+    return (GfxVideo){a->cfg.height, a->cfg.fullscreen || a->fullscreen_arg, a->cfg.vsync, a->cfg.fps};
+}
+
+static void apply_effects(App *a)
+{
+    a->g.no_glow = !a->cfg.glow;
+    a->g.no_particles = !a->cfg.particles;
+    a->g.no_shake = !a->cfg.shake;
+}
+
+void apply_graphics(App *a)
+{
+    apply_effects(a);
+    const GfxVideo v = video_settings(a);
+    gfx_set_video(&a->g, &v);
+}
+
+static void load_background(App *a, int id, GfxImage *bg)
 {
     char name[128];
-    gfx_free_image(&a->bg);
-    gfx_free_image(&a->ground);
-    snprintf(name, sizeof name, "game_bg_%02d_001-hd.png", gm->bg_id);
-    if (gfx_load_image(&a->g, name, &a->bg)) gfx_load_image(&a->g, "game_bg_01_001-hd.png", &a->bg);
-    snprintf(name, sizeof name, "groundSquare_%02d_001-hd.png", gm->ground_id);
-    if (gfx_load_image(&a->g, name, &a->ground))
-        gfx_load_image(&a->g, "groundSquare_01_001-hd.png", &a->ground);
-    gfx_free_image(&a->ground2);
-    if (gm->ground_id >= 8) {   // grounds from 8 on come in two layers
-        snprintf(name, sizeof name, "groundSquare_%02d_2_001-hd.png", gm->ground_id);
-        if (gfx_load_image(&a->g, name, &a->ground2)) memset(&a->ground2, 0, sizeof a->ground2);
+    gfx_free_image(bg);
+    snprintf(name, sizeof name, "game_bg_%02d_001-hd.png", id);
+    if (gfx_load_image(&a->g, name, bg)) gfx_load_image(&a->g, "game_bg_01_001-hd.png", bg);
+}
+
+static void load_ground(App *a, int id, GfxImage *ground, GfxImage *second)
+{
+    char name[128];
+    gfx_free_image(ground);
+    snprintf(name, sizeof name, "groundSquare_%02d_001-hd.png", id);
+    if (gfx_load_image(&a->g, name, ground)) gfx_load_image(&a->g, "groundSquare_01_001-hd.png", ground);
+    gfx_free_image(second);
+    if (id >= 8) {   // grounds from 8 on come in two layers
+        snprintf(name, sizeof name, "groundSquare_%02d_2_001-hd.png", id);
+        if (gfx_load_image(&a->g, name, second)) memset(second, 0, sizeof *second);
     }
+}
+
+static void load_middleground(App *a, int id, GfxImage *layers)
+{
+    char name[128];
+    gfx_free_image(&layers[0]);
+    gfx_free_image(&layers[1]);
+    if (id <= 0) return;
+    snprintf(name, sizeof name, "fg_%02d_001-hd.png", id);
+    if (gfx_load_image(&a->g, name, &layers[0])) memset(&layers[0], 0, sizeof layers[0]);
+    snprintf(name, sizeof name, "fg_%02d_2_001-hd.png", id);
+    if (gfx_load_image(&a->g, name, &layers[1])) memset(&layers[1], 0, sizeof layers[1]);
+}
+
+// The pictures of a level, with those its triggers change to, so that nothing is loaded in play.
+static void load_bg_images(App *a, const Game *gm)
+{
+    load_background(a, gm->bg_id0, &a->bg);
+    load_middleground(a, gm->mg_id0, a->mg[0]);
+    for (int i = 0; i < 3; i++) load_middleground(a, i < gm->nmg_used ? gm->mg_used[i] : 0, a->mg[i + 1]);
+    load_ground(a, gm->ground_id0, &a->ground, &a->ground2);
+    for (int i = 0; i < 8; i++) {
+        if (i < gm->nbg_used) load_background(a, gm->bg_used[i], &a->other_bg[i]);
+        else gfx_free_image(&a->other_bg[i]);
+        if (i < gm->nground_used) load_ground(a, gm->ground_used[i], &a->other_ground[i], &a->other_ground2[i]);
+        else { gfx_free_image(&a->other_ground[i]); gfx_free_image(&a->other_ground2[i]); }
+    }
+}
+
+// The level, with the background and ground that hold at this moment.
+static void draw_world(App *a, float vw, float scale)
+{
+    Game *gm = &a->game;
+    const GfxImage *bg = &a->bg, *ground = &a->ground;
+    gm->ground2 = &a->ground2;
+    for (int i = 0; i < gm->nbg_used && gm->view.bg_id != gm->bg_id0; i++)
+        if (gm->bg_used[i] == gm->view.bg_id) bg = &a->other_bg[i];
+    for (int i = 0; i < gm->nground_used && gm->view.ground_id != gm->ground_id0; i++)
+        if (gm->ground_used[i] == gm->view.ground_id) {
+            ground = &a->other_ground[i];
+            gm->ground2 = &a->other_ground2[i];
+        }
+    int mg = gm->view.mg_id == gm->mg_id0 ? 0 : -1;
+    for (int i = 0; i < gm->nmg_used && mg < 0; i++)
+        if (gm->mg_used[i] == gm->view.mg_id) mg = i + 1;
+    gm->mg = mg >= 0 ? &a->mg[mg][0] : NULL;
+    gm->mg2 = mg >= 0 ? &a->mg[mg][1] : NULL;
+    game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, bg, ground);
 }
 
 int start_level(App *a, int idx)
 {
+    practice_free(a);
     if (a->game_loaded) game_free(&a->game);
     if (game_load(&a->game, &a->g, a->levels[idx].path, a->levels[idx].data)) { a->game_loaded = 0; return -1; }
     a->game_loaded = 1;
     snprintf(a->game.name, sizeof a->game.name, "%s", a->levels[idx].name);
     a->game.best_percent = a->levels[idx].best;
+    {
+        char key[SONG_NAME + 8];
+        level_coin_key(&a->levels[idx], key, sizeof key);
+        a->game.coins_owned = coins_owned(key);
+    }
     load_bg_images(a, &a->game);
-    a->game.ground2 = &a->ground2;
     apply_skin(a);
     a->cur = idx;
     a->music_key[0] = 0;
@@ -184,7 +269,8 @@ int start_level(App *a, int idx)
 void leave_level(App *a)
 {
     play_effect(a, SFX_QUIT);
-    if (a->game_loaded) a->levels[a->cur].best = a->game.best_percent;
+    practice_keep_best(a);
+    practice_free(a);
     if (a->cur < a->nofficial) {
         a->sel = a->cur;
         ui_go(a, SC_SELECT);
@@ -197,6 +283,13 @@ void leave_level(App *a)
 void restart(App *a)
 {
     a->intro = 0;
+    if (a->game.finished && !a->practice) {   // the coins just kept show as owned from now on
+        char key[SONG_NAME + 8];
+        level_coin_key(&a->levels[a->cur], key, sizeof key);
+        a->game.coins_owned = coins_owned(key);
+    }
+    practice_keep_best(a);
+    practice_restarted(a);
     game_reset(&a->game);
     a->game.attempts++;
     a->paused = 0;
@@ -221,6 +314,22 @@ const char *level_choice(const LevelEntry *e)
     const char *picked = songs_choice(key);
     if (*picked && (strcmp(picked, "bundle") || e->song_name[0])) return picked;
     return e->song_name[0] ? "bundle" : "none";
+}
+
+void level_coin_key(const LevelEntry *e, char *out, size_t cap)
+{
+    if (e->official) snprintf(out, cap, "official:%d", e->track);
+    else level_song_key(e, out, cap);
+}
+
+// Coins count once the level is finished in normal mode.
+static void coins_keep(App *a)
+{
+    Game *gm = &a->game;
+    if (!a->game_loaded || !gm->finished || a->practice || !gm->ncoins) return;
+    char key[SONG_NAME + 8];
+    level_coin_key(&a->levels[a->cur], key, sizeof key);
+    coins_store(key, game_coins(gm), gm->ncoins);
 }
 
 int level_song(const App *a, int idx, char *out, size_t cap)
@@ -261,8 +370,18 @@ static void music_update(App *a)
     float fade_in = 0;
     const Game *gm = &a->game;
     const int playing = a->scene == SC_PLAY && a->game_loaded;
+    // practice mode: its own music runs on through crashes; each crash still sounds
+    const int dead = playing && gm->p.dead;
+    if (playing && a->practice) {
+        if (dead && !a->was_dead && !(gm->logic.options & OPT_NO_DEATH_SOUND)) play_effect(a, SFX_CRASH);
+        else if (!dead && a->was_dead) audio_sfx_stop();
+    }
+    a->was_dead = playing && a->practice && dead;
     if (playing && a->intro > 0) {
         snprintf(key, sizeof key, "intro");
+    } else if (playing && a->practice) {
+        snprintf(path, sizeof path, "%s/StayInsideMe.mp3", a->resdir);
+        snprintf(key, sizeof key, "practice");
     } else if (playing && gm->p.dead) {
         snprintf(key, sizeof key, "crash");
     } else if (playing) {
@@ -287,7 +406,8 @@ static void music_update(App *a)
         if (attempt && !level_song(a, a->cur, path, sizeof path)) path[0] = 0;
         if (!strcmp(key, "crash")) {
             audio_stop();
-            play_effect(a, SFX_CRASH);
+            audio_voices_stop();
+            if (!(gm->logic.options & OPT_NO_DEATH_SOUND)) play_effect(a, SFX_CRASH);
         } else if (!strcmp(key, "intro")) {
             audio_fade_out(0.08f);   // the menu music ends with the press of the button
         } else if (path[0]) {
@@ -306,6 +426,63 @@ static void music_update(App *a)
         a->game.pulse = heard ? audio_pulse() : -1.0f;
         a->game.loud = heard ? audio_loudness() : -1.0f;
     }
+}
+
+// A sound effect (sound != 0) or song of the game by its number: in the game's folder, its save
+// folder (the downloaded ones) or the player's music folder.
+static int find_sound(const App *a, int sound, int id, char *out, size_t cap)
+{
+    char save[600];
+    snprintf(save, sizeof save, "%s", a->save_path);
+    char *cut = NULL;
+    for (char *p = save; *p; p++)
+        if (*p == '/' || *p == '\\') cut = p;
+    if (cut) *cut = 0;
+    if (sound) {
+        snprintf(out, cap, "%s/sfx/s%d.ogg", a->resdir, id);
+        if (file_exists(out)) return 1;
+        if (save[0]) snprintf(out, cap, "%s/s%d.ogg", save, id);
+        if (save[0] && file_exists(out)) return 1;
+        snprintf(out, cap, "%s/sfx/s%d.ogg", a->music_dir, id);
+        return file_exists(out);
+    }
+    const char *dirs[3] = {a->resdir, save, a->music_dir};
+    for (int i = 0; i < 6; i++) {
+        if (!dirs[i / 2][0]) continue;
+        snprintf(out, cap, "%s/%d.%s", dirs[i / 2], id, i & 1 ? "ogg" : "mp3");
+        if (file_exists(out)) return 1;
+    }
+    return 0;
+}
+
+// Plays what the level's sound and song triggers asked for since the last picture.
+static void level_sounds(App *a, int audible)
+{
+    Game *gm = &a->game;
+    for (int i = 0; audible && i < gm->nsnd; i++) {
+        const Sound *s = &gm->snd[i];
+        char path[720];
+        const AudioVoice v = {s->volume, s->speed, s->start, s->end, s->fade_in, s->fade_out, s->loop,
+                              s->type == SND_SONG ? -1000 - s->group : s->uid, s->group};
+        if (s->type == SND_SFX) {
+            if (find_sound(a, 1, s->id, path, sizeof path)) audio_voice_start(path, &v);
+        } else if (s->type == SND_SFX_EDIT) {
+            audio_voice_change(s->uid, s->group, s->stop, s->set_volume, s->volume, s->fade_in);
+        } else if (a->practice) {
+            continue;   // practice mode has its own music
+        } else if (s->type == SND_SONG) {
+            if (!find_sound(a, 0, s->id, path, sizeof path)) continue;
+            if (s->group) audio_voice_start(path, &v);   // another song channel plays beside the music
+            else if (!audio_play(path, s->start, s->loop, s->fade_in)) audio_music_gain(s->volume, 0);
+        } else if (s->group) {
+            audio_voice_change(-1000 - s->group, 0, s->stop, s->set_volume, s->volume, s->fade_in);
+        } else if (s->stop) {
+            audio_fade_out(s->fade_in > 0 ? s->fade_in : 0.05f);
+        } else if (s->set_volume) {
+            audio_music_gain(s->volume, s->fade_in);
+        }
+    }
+    gm->nsnd = 0;
 }
 
 // ------------------------------------------------------------ in-level display
@@ -350,27 +527,28 @@ static void draw_play(App *a)
 {
     a->nhot = 0;
     Game *gm = &a->game;
-    Gfx *g = &a->g;
     float scale = a->lh / VIEW_H;
     float vw = a->lw / scale;
-    game_draw(gm, g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+    draw_world(a, vw, scale);
+    practice_draw(a);
 
     char s[128];
     // "Attempt N" stands in the level, in the middle of the first screen
     const float at_x = pt_width(a) * 0.5f - gm->cam_x;
-    if (at_x > -150.0f && !gm->finished) {
+    if (at_x > -150.0f && !gm->finished && !(gm->logic.options & OPT_HIDE_ATTEMPTS)) {
         snprintf(s, sizeof s, "Attempt %d", gm->attempts);
         label(a, &a->big, s, at_x, 243.0f - (gm->cam_bottom - -90.0f), 1.0f, 1, WHITE, 0);
     }
     draw_hud(a);
 #ifdef __SWITCH__
-    const GdFrame *pause = gfx_find(g, "GJ_pauseBtn_001.png");   // the original shows it on touch devices
-    if (pause) gfx_frame(g, pause, UI_W - 50, 50, 0, 0.7f, 0.7f, WHITE, 0);
+    const GdFrame *pause = gfx_find(&a->g, "GJ_pauseBtn_001.png");   // the original shows it on touch devices
+    if (pause) gfx_frame(&a->g, pause, UI_W - 50, 50, 0, 0.7f, 0.7f, WHITE, 0);
 #endif
     if (g_bot_hud[0]) text(a, g_bot_hud, 20, 672, 0.32f, 0, C(255, 255, 255, 0.9f));
 
     if (gm->finished) ui_draw_complete(a);
     else if (a->paused) ui_draw_pause(a);
+    else if (a->practice) ui_draw_checkpoint_buttons(a);
 }
 
 // ------------------------------------------------------------ bot run (development aid)
@@ -609,6 +787,27 @@ static int save_shot(App *a, const char *path)
     return ok ? 0 : -1;
 }
 
+// Pictures per second in the lower left corner, measured over half a second.
+static void draw_fps(App *a)
+{
+    static Uint64 since;
+    static int frames;
+    static float fps;
+    const Uint64 now = SDL_GetPerformanceCounter(), second = SDL_GetPerformanceFrequency();
+    if (!since) since = now;
+    else frames++;
+    if (now - since >= second / 2) {
+        fps = (float)((double)frames * (double)second / (double)(now - since));
+        since = now;
+        frames = 0;
+    }
+    char s[48];
+    const int hz = gfx_refresh_hz();
+    if (hz) snprintf(s, sizeof s, "%.0f FPS / %d Hz", fps, hz);
+    else snprintf(s, sizeof s, "%.0f FPS", fps);
+    text(a, s, 10.0f, a->lh - 32.0f, 0.35f, 0, WHITE);
+}
+
 static void render(App *a)
 {
     gfx_begin_frame(&a->g);
@@ -628,6 +827,7 @@ static void render(App *a)
     // a level chosen in a menu appears out of the dark like in the original
     if (a->scene == SC_PLAY && a->intro > 0) dark = fmaxf(dark, 1.0f - (LEVEL_INTRO - a->intro - 0.15f) / 0.5f);
     if (dark > 0) gfx_fill(&a->g, (SDL_FRect){0, 0, a->lw, a->lh}, C(0, 0, 0, fminf(dark, 1.0f)));
+    if (a->cfg.show_fps) draw_fps(a);
     gfx_present(&a->g);
 }
 
@@ -702,6 +902,22 @@ static int ref_load(const char *dir, int mark, float *edges)
 }
 #endif
 
+// GD_PROBE="3,7": at every spot of the tour, where the first object of those groups is and whether
+// it is switched off, then all item counters and timers (to check triggers).
+static void probe(const Game *gm)
+{
+    const char *p = getenv("GD_PROBE");
+    if (!p) return;
+    for (int group = atoi(p); p; p = strchr(p, ','), p = p ? p + 1 : NULL, group = p ? atoi(p) : 0) {
+        if (group <= 0 || group >= GD_GROUPS || gm->grp_start[group] >= gm->grp_start[group + 1]) continue;
+        const Obj *o = &gm->obj[gm->grp_items[gm->grp_start[group]]];
+        printf("  g%d %.1f,%.1f r%.0f s%.2f%s\n", group, o->x, o->y, o->rot, o->sx, o->off ? " off" : "");
+    }
+    for (int i = 0; i < gm->logic.nitem; i++) printf("  item %d = %d\n", gm->logic.item[i], gm->logic.value[i]);
+    for (int i = 0; i < gm->logic.ntimer; i++)
+        printf("  timer %d = %.2f%s\n", gm->logic.timer[i].id, gm->logic.timer[i].value, gm->logic.timer[i].on ? " running" : "");
+}
+
 //
 // Runs a level without input and without deaths (like the original game with noclip) and saves a
 // picture each time the player reaches one of the requested progress values (per mille).
@@ -710,7 +926,7 @@ static int tour(App *a, int idx, const char *marks, const char *dir, float extra
     if (start_level(a, idx) != 0) { puts("load failed"); return 1; }
     Game *gm = &a->game;
     const float len = gm->end_x - 380.0f + extra_len;   // progress bar of the original -> position
-    const float scale = (float)a->g.h / VIEW_H, vw = (float)a->g.w / scale;
+    const float scale = a->lh / VIEW_H, vw = a->lw / scale;
     static const float tc1[3] = {0, 255, 255}, tc2[3] = {0, 0, 255};   // colours used in the recordings
     game_set_skin(gm, a->cfg.icon, tc1, tc2);
     game_reset(gm);
@@ -743,7 +959,7 @@ static int tour(App *a, int idx, const char *marks, const char *dir, float extra
             // the camera is advanced while drawing too, so draw (without showing) every frame
             if (shown) {
                 gfx_begin_frame(&a->g);
-                game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+                draw_world(a, vw, scale);
 #ifdef GD_ALIGN
                 if (aligned && gm->p.x >= from) {
                     int w, h, dy = 0;
@@ -771,19 +987,70 @@ static int tour(App *a, int idx, const char *marks, const char *dir, float extra
 #endif
         {
             gfx_begin_frame(&a->g);
-            game_draw(gm, &a->g, vw, VIEW_H, scale, 0, 0, &a->bg, &a->ground);
+            draw_world(a, vw, scale);
             if (getenv("GD_TOURHUD")) draw_hud(a);   // laid out for 1280x720, close enough at 1280x800
             char path[700];
             snprintf(path, sizeof path, "%s/p%04d.png", dir, mark);
             if (save_shot(a, path)) { printf("cannot write %s\n", path); return 1; }
             printf("p%04d x=%.0f y=%.0f mode=%d\n", mark, gm->p.x, gm->p.y, gm->p.mode);
         }
+        probe(gm);
         gfx_present(&a->g);
         const char *c = strchr(s, ',');
         s = c ? c + 1 : NULL;
     }
     return 0;
 }
+
+#ifdef __SWITCH__
+// ------------------------------------------------------------ touch screen
+//
+// SDL's video system, which would deliver touches, is not used. Positions are asked for in
+// 1280x720; should the console report its 1920x1080 panel anyway, the first one outside tells.
+static u32 s_touch_w = 1280, s_touch_h = 720;
+
+static void touch_init(void)
+{
+    const Result rc = hidSetTouchScreenOutputRanges(1280, 720);   // before the touch screen starts
+    fprintf(stderr, "touch: range request 0x%x\n", (unsigned)rc);
+    hidInitializeTouchScreen();
+}
+
+// Tells the menus about every finger that was put down, moved or lifted since the last picture.
+static void touch_poll(App *a)
+{
+    static struct { u32 id; float x, y; } held[MAX_TOUCH];
+    static int nheld, logged;
+    static u64 last;
+    HidTouchScreenState s = {0};
+    if (!hidGetTouchScreenStates(&s, 1) || s.sampling_number == last) return;
+    last = s.sampling_number;
+    const int n = s.count < 0 ? 0 : s.count < MAX_TOUCH ? s.count : MAX_TOUCH;
+    for (int i = 0; i < nheld; i++) {   // lifted ones first
+        int still = 0;
+        for (int j = 0; j < n; j++) still |= s.touches[j].finger_id == held[i].id;
+        if (!still) ui_touch(a, TOUCH_UP, (int)held[i].id, held[i].x, held[i].y);
+    }
+    struct { u32 id; float x, y; } now[MAX_TOUCH];
+    for (int j = 0; j < n; j++) {
+        const HidTouchState *t = &s.touches[j];
+        if (!logged) { fprintf(stderr, "touch: first at %u,%u\n", t->x, t->y); logged = 1; }
+        if (s_touch_w == 1280 && (t->x >= 1280 || t->y >= 720)) {
+            s_touch_w = 1920;
+            s_touch_h = 1080;
+            fprintf(stderr, "touch: %u,%u, so the positions are 1920x1080\n", t->x, t->y);
+        }
+        int was = 0;
+        for (int i = 0; i < nheld; i++) was |= held[i].id == t->finger_id;
+        now[j].id = t->finger_id;
+        now[j].x = (float)t->x * a->lw / (float)s_touch_w;
+        now[j].y = (float)t->y * a->lh / (float)s_touch_h;
+        ui_touch(a, was ? TOUCH_MOVE : TOUCH_DOWN, (int)now[j].id, now[j].x, now[j].y);
+    }
+    for (int j = 0; j < n; j++) { held[j].id = now[j].id; held[j].x = now[j].x; held[j].y = now[j].y; }
+    nheld = n;
+}
+#endif
 
 int main(int argc, char **argv)
 {
@@ -793,7 +1060,7 @@ int main(int argc, char **argv)
     float tp_x = -1, tp_y = 15;
     int mode = -1, selftest_level = -1, rttest_level = -1;
     float selftest_secs = 120, rt_secs = 0;
-    int rt_intro = 0;
+    int rt_intro = 0, rt_practice = 0;
     const char *bot_spec = NULL;
     int shot_mirror = 0, shot_mini = 0, shot_flip = 0, shot_dual = 0;
     int bot_speed = 1;
@@ -806,29 +1073,19 @@ int main(int argc, char **argv)
     const char *local = getenv("LOCALAPPDATA");   // where the game keeps its save file
     if (local) snprintf(a->save_path, sizeof a->save_path, "%s/GeometryDash/CCGameManager.dat", local);
 #endif
-    snprintf(a->resdir, sizeof a->resdir, "%s",
 #ifdef __SWITCH__
-             "sdmc:/switch/gd/Resources");
+    const char *home = named("sdmc:/switch/ounce-dash", "sdmc:/switch/gd");
+    snprintf(a->resdir, sizeof a->resdir, "%s/Resources", home);
+    snprintf(a->custom_dir, sizeof a->custom_dir, "%s/levels", home);
+    snprintf(a->music_dir, sizeof a->music_dir, "%s/music", home);
+    snprintf(a->cfg_path, sizeof a->cfg_path, "%s/config.ini", home);
+    char log_path[64];
+    snprintf(log_path, sizeof log_path, "%s/log.txt", home);
 #else
-             "C:/Program Files (x86)/Steam/steamapps/common/Geometry Dash/Resources");
-#endif
-    snprintf(a->custom_dir, sizeof a->custom_dir, "%s",
-#ifdef __SWITCH__
-             "sdmc:/switch/gd/levels");
-#else
-             "gd-levels");
-#endif
-    snprintf(a->music_dir, sizeof a->music_dir, "%s",
-#ifdef __SWITCH__
-             "sdmc:/switch/gd/music");
-#else
-             "gd-music");
-#endif
-    snprintf(a->cfg_path, sizeof a->cfg_path, "%s",
-#ifdef __SWITCH__
-             "sdmc:/switch/gd/config.ini");
-#else
-             "gd-config.ini");
+    snprintf(a->resdir, sizeof a->resdir, "C:/Program Files (x86)/Steam/steamapps/common/Geometry Dash/Resources");
+    snprintf(a->custom_dir, sizeof a->custom_dir, "%s", named("ounce-dash-levels", "gd-levels"));
+    snprintf(a->music_dir, sizeof a->music_dir, "%s", named("ounce-dash-music", "gd-music"));
+    snprintf(a->cfg_path, sizeof a->cfg_path, "%s", named("ounce-dash.ini", "gd-config.ini"));
 #endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--res") && i + 1 < argc) snprintf(a->resdir, sizeof a->resdir, "%s", argv[++i]);
@@ -849,6 +1106,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--bench") && i + 1 < argc) bench_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!strcmp(argv[i], "--intro")) rt_intro = 1;
+        else if (!strcmp(argv[i], "--practice")) rt_practice = 1;
         else if (!strcmp(argv[i], "--mirror")) shot_mirror = 1;
         else if (!strcmp(argv[i], "--mini")) shot_mini = 1;
         else if (!strcmp(argv[i], "--flip")) shot_flip = 1;
@@ -869,9 +1127,9 @@ int main(int argc, char **argv)
     }
 #ifdef __SWITCH__
     // Log to the SD card so a failed start can be diagnosed.
-    freopen("sdmc:/switch/gd/log.txt", "w", stderr);
+    freopen(log_path, "w", stderr);
     setvbuf(stderr, NULL, _IONBF, 0);
-    fprintf(stderr, "gd-switch2 start, res=%s\n", a->resdir);
+    fprintf(stderr, "Ounce Dash start, res=%s\n", a->resdir);
 #endif
     if (export_dir) {   // writes the saved online levels as files, for the console
         GdSavedLevel *list = NULL;
@@ -884,7 +1142,12 @@ int main(int argc, char **argv)
     // the tour renders in 16:10 like the recordings of the original game
     a->lw = UI_W;
     a->lh = tour_marks || tall ? 800.0f : UI_H;
-    int rc_init = gfx_init(&a->g, a->resdir, (int)a->lw, (int)a->lh, fullscreen);
+    config_load(&a->cfg, a->cfg_path);
+    a->fullscreen_arg = fullscreen;
+    GfxVideo video = video_settings(a);
+    // pictures for comparisons are always made in the drawing size, in a window
+    if (tour_marks || shot || selftest_level >= 0) video = (GfxVideo){0, 0, 1, 60};
+    int rc_init = gfx_init(&a->g, a->resdir, (int)a->lw, (int)a->lh, &video);
     if (rc_init != 0) {
         fprintf(stderr, "init failed rc=%d (resources: %s)\n", rc_init, a->resdir);
 #ifdef __SWITCH__
@@ -893,13 +1156,13 @@ int main(int argc, char **argv)
         snprintf(sdl_err, sizeof sdl_err, "%s", SDL_GetError());
         gfx_quit(&a->g);   // releases the screen so that the console can use it
         consoleInit(NULL);
-        printf("Geometry Dash (fan port): start failed\n\nerror %d: %s\n", rc_init,
+        printf("Ounce Dash: start failed\n\nerror %d: %s\n", rc_init,
                rc_init == -4   ? "cannot load the sprite sheets"
                : rc_init == -5 ? "cannot create textures (out of memory?)"
                                : "cannot set up graphics");
         if (rc_init == -4) printf("resources: %s\n", a->resdir);
         else printf("SDL: %s\n", sdl_err);
-        printf("\nDetails: sdmc:/switch/gd/log.txt\n\nPress + to exit.\n");
+        printf("\nDetails: %s\n\nPress + to exit.\n", log_path);
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
         PadState ep;
         padInitializeDefault(&ep);
@@ -913,21 +1176,28 @@ int main(int argc, char **argv)
         return 1;
     }
     fprintf(stderr, "gfx ok (%dx%d), %d sheets\n", a->g.w, a->g.h, a->g.atlas.nsheets);
+    apply_effects(a);
     ui_load(a);
     scan_levels(a);
-    config_load(&a->cfg, a->cfg_path);
     {   // the chosen songs are kept next to the settings
         char list[600];
         const char *name = a->cfg_path;
         for (const char *p = a->cfg_path; *p; p++)
             if (*p == '/' || *p == '\\') name = p + 1;
-        snprintf(list, sizeof list, "%.*sgd-songs.ini", (int)(name - a->cfg_path), a->cfg_path);
-        songs_load(list);
+        char before[600];
+        const int dir = (int)(name - a->cfg_path);
+        snprintf(list, sizeof list, "%.*sounce-dash-songs.ini", dir, a->cfg_path);
+        snprintf(before, sizeof before, "%.*sgd-songs.ini", dir, a->cfg_path);
+        songs_load(named(list, before));
+        snprintf(list, sizeof list, "%.*sounce-dash-coins.ini", dir, a->cfg_path);
+        snprintf(before, sizeof before, "%.*sgd-coins.ini", dir, a->cfg_path);
+        coins_load(named(list, before));
     }
 #ifdef __SWITCH__
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     PadState pad;
     padInitializeDefault(&pad);
+    touch_init();
 #else
     for (int i = 0; i < SDL_NumJoysticks(); i++) SDL_JoystickOpen(i);
     SDL_ShowCursor(SDL_ENABLE);
@@ -952,6 +1222,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(scene, "controls")) ui_go(a, SC_CONTROLS);
         else if (!strcmp(scene, "settings")) ui_go(a, SC_SETTINGS);
+        else if (!strcmp(scene, "graphics")) ui_go(a, SC_GRAPHICS);
         else if (!strcmp(scene, "songs")) { a->online_sel = shot_online; ui_open_songs(a); }
         else if (!strcmp(scene, "online") || !strcmp(scene, "level")) {
             ui_go(a, !strcmp(scene, "level") ? SC_LEVEL : SC_ONLINE);
@@ -973,6 +1244,11 @@ int main(int argc, char **argv)
                 a->game.cam_x = tp_x - 190;
                 a->game.time = 5;
                 a->game.percent = tp_x / (a->game.end_x - 380) * 100.0f;
+            }
+            if (rt_practice) {
+                a->practice = 1;
+                practice_place(a);
+                a->game.p.x += 60.0f;
             }
             if (!strcmp(scene, "complete")) a->game.finished = 1;
             if (!strcmp(scene, "pause")) { a->paused = 1; a->focus_id = H_RESUME; }
@@ -998,6 +1274,7 @@ int main(int argc, char **argv)
             audio_volume(a->cfg.music / 100.0f);
             play_effect(a, SFX_PLAY);
         }
+        if (rt_practice) a->practice = 1;
         rt_start = SDL_GetPerformanceCounter();
     }
     // --bot "all" | "1,4,7-9": watch the look-ahead bot play levels in the window
@@ -1044,6 +1321,7 @@ int main(int argc, char **argv)
             je.jbutton.button = (Uint8)b;
             ui_event(a, &je);
         }
+        touch_poll(a);
 #endif
         while (SDL_PollEvent(&e)) ui_event(a, &e);
         Uint64 now = SDL_GetPerformanceCounter();
@@ -1098,13 +1376,26 @@ int main(int argc, char **argv)
         }
         if (a->scene == SC_PLAY && !a->paused) {
             if (a->intro > 0) a->intro -= dt_smooth;   // the attempt waits until the level is there
-            else game_update(&a->game, dt_smooth);
+            else {
+                game_update(&a->game, dt_smooth);
+                practice_frame(a, dt_smooth);
+                coins_keep(a);
+            }
+        }
+        if (rt_practice) {   // development: what practice mode does in a run without input
+            static int was, shown;
+            if (a->game.p.dead && !was) printf("crash at x=%.0f with %d checkpoint(s)\n", a->game.p.x, a->ncheck);
+            if (!a->game.p.dead && was) printf("back at x=%.0f (attempt %d)\n", a->game.p.x, a->game.attempts);
+            if (a->ncheck != shown) printf("checkpoints %d, newest at x=%.0f\n", a->ncheck, a->ncheck ? a->check[a->ncheck - 1].s.p.x : 0.0f);
+            was = a->game.p.dead;
+            shown = a->ncheck;
         }
         if (sound) {
             audio_volume(a->cfg.music / 100.0f);
             audio_sfx_volume(a->cfg.sfx / 100.0f);
             music_update(a);
         }
+        if (a->game_loaded) level_sounds(a, sound && a->scene == SC_PLAY);
         render(a);
         if (rttest_level >= 0 && rt_secs > 0 && a->dbg_sum_dt >= rt_secs) break;
         if (rttest_level >= 0 && rt_secs <= 0 && a->game.p.dead) {
@@ -1115,6 +1406,7 @@ int main(int argc, char **argv)
         }
     }
     audio_quit();
+    practice_free(a);
     config_save(&a->cfg, a->cfg_path);
     if (a->game_loaded) game_free(&a->game);
     gfx_quit(&a->g);

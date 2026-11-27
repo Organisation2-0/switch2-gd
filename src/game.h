@@ -13,13 +13,17 @@
 enum { AN_BEAST1, AN_BEAST2, AN_BEAST3, AN_BEAST4, AN_BEAST5, AN_ROBOT_RUN, AN_ROBOT_JUMP, AN_ROBOT_FALL,
        AN_SPIDER_RUN, AN_SPIDER_FALL, AN_BITE, AN_COUNT };
 
-typedef enum { OT_DECO, OT_SOLID, OT_HAZARD, OT_PORTAL, OT_PAD, OT_ORB, OT_SPEED, OT_TRIGGER, OT_HIDDEN, OT_FORCE, OT_SENSOR, OT_HBLOCK } ObjType;
+typedef enum { OT_DECO, OT_SOLID, OT_HAZARD, OT_PORTAL, OT_PAD, OT_ORB, OT_SPEED, OT_TRIGGER, OT_HIDDEN, OT_FORCE, OT_SENSOR, OT_HBLOCK, OT_COIN } ObjType;
 
 // Portal kinds (Obj.sub for OT_PORTAL)
 enum { P_GRAV_DOWN = 1, P_GRAV_UP, P_CUBE, P_SHIP, P_BALL, P_UFO, P_WAVE, P_SIZE_NORMAL, P_SIZE_MINI,
-       P_MIRROR_ON, P_MIRROR_OFF, P_DUAL_ON, P_DUAL_OFF, P_ROBOT, P_SPIDER, P_OTHER, P_TELEPORT, P_SWING };
+       P_MIRROR_ON, P_MIRROR_OFF, P_DUAL_ON, P_DUAL_OFF, P_ROBOT, P_SPIDER, P_OTHER, P_TELEPORT, P_SWING,
+       P_GRAV_TOGGLE };
 // Player modes
 enum { M_CUBE = 0, M_SHIP, M_BALL, M_UFO, M_WAVE, M_ROBOT, M_SPIDER, M_SWING };
+// Invisible helper blocks (Obj.sub for OT_HBLOCK): H forgives hitting the head, F turns gravity
+// around then, D lets the wave slide on blocks, S ends a dash.
+enum { SB_HEAD, SB_FLIP, SB_DART, SB_STOPDASH };
 // Movement frame (gameplay rotation / reverse): forward and up as axis-aligned unit vectors.
 typedef struct { signed char fx, fy, ux, uy; } Frame;
 // Pad / orb kinds
@@ -51,6 +55,32 @@ typedef struct {
     float hs, ss, vs;                // hue shift (degrees), saturation and value factor/offset
 } Channel;
 
+// The properties of an object as the level stores them (see GdObject).
+typedef struct {
+    int nprops;
+    char *text;                    // key 442, 430 or 145
+    GdProp prop[];
+} TData;
+
+// What a special block does when the icon touches it (Obj.sub for OT_SENSOR; 0: a collision block)
+enum { SN_BLOCK, SN_STATE, SN_TOGGLE, SN_NOBUFFER };
+
+// An area or enter trigger at work: how strongly it changes an object depends on the object's
+// distance from a centre object (area) or from the screen edge (enter). Looks only.
+enum { AREA_MOVE, AREA_ROTATE, AREA_SCALE, AREA_FADE, AREA_TINT };
+typedef struct {
+    int src;                       // its trigger
+    short group, center, effect, channel, colour;
+    unsigned char kind, enter;     // enter: 1 an enter effect (channel), 0 an area (group)
+    unsigned char dir, xy, relative, inwards, ease_out, side;
+    float length, offset, front, back, dead, rate, rate2;
+    float dist, angle, mx, my, rot, sx, sy, to_alpha, from_alpha, tint;
+    short ease, ease2;
+} AreaFx;
+#define GD_MAX_AREAS 32
+struct GdTrack;                    // a keyframe animation (motion.c)
+struct GdAreaObj;                  // what the areas make of one object (motion.c)
+
 typedef struct {
     int id;
     float x, y, rot, sx, sy;       // world position, rotation, signed scale (flip)
@@ -60,6 +90,8 @@ typedef struct {
     int ch_main, ch_detail;
     int zlayer, zorder;
     float hw, hh, hx, hy;          // hitbox half size and centre offset (world units, rotation/flip baked in)
+    float bw, bh, tilt;            // a box turned by an odd angle: its own half size and the angle (radians,
+                                   // counterclockwise; 0: the box is hw x hh and lies straight)
     float rad;                     // >0: circular hazard hitbox radius (centred on x,y)
     int used, used2;               // already triggered by player 1 / player 2
     // trigger data
@@ -91,6 +123,7 @@ typedef struct {
     unsigned char passable;        // 2.2 one-way block: only landing on it counts
     unsigned char nodraw;          // hidden by the level, or an editor-only helper
     unsigned char invisible;       // "invisible" block / spike: only shows away from the icon
+    unsigned char notouch;         // placed with "no touch": collides with nothing
     unsigned char fill;            // shaded filler square: never blended additively
     unsigned char faint;           // black decoration that only shades what is behind it
     unsigned char beat;            // sized by the music: 1 = decoration ball, 2 = orb
@@ -111,7 +144,72 @@ typedef struct {
     unsigned char fx_trigger;      // only plays (once) when an animate trigger starts it
     int fx_run;                    // attempt in which it was started ...
     float fx_at, fx_speed;         // ... and when; speed factor of the frames
+    float kx, ky;                  // factors scale triggers have applied to size and hitbox (1 = none)
+    TData *data;                   // every property, kept for triggers and special objects (else NULL)
+    unsigned char enter_ch;        // enter effect channel
+    unsigned char on_screen;       // fixed to the screen by a UI trigger: not drawn in the level
 } Obj;
+
+// A particle object (2065) or its settings, from the string of key 145.
+#define PARTICLE_FIELDS 72
+typedef struct { int obj; float v[PARTICLE_FIELDS]; } Emitter;
+#define GD_MAX_BURSTS 24
+typedef struct { int emitter; float x, y, rot, scale, start; } Burst;   // a spawn particle trigger
+
+// Sounds the level asks for; the application plays them.
+enum { SND_SFX, SND_SFX_EDIT, SND_SONG, SND_SONG_EDIT };
+typedef struct {
+    unsigned char type, loop, stop, set_volume;
+    int id, uid, group;                       // sound or song number; unique id and sound group
+    float volume, speed, start, end, fade_in, fade_out;   // times in seconds
+} Sound;
+#define GD_MAX_SOUNDS 32
+
+// A value of a 2.2 trigger that glides from one setting to the next.
+typedef struct { float from, to, t, dur, rate; int ease; } Tween;
+enum { SH_SHOCKWAVE, SH_SHOCKLINE, SH_GLITCH, SH_CHROMATIC, SH_CHROMAGLITCH, SH_PIXELATE, SH_LENS, SH_RADIAL,
+       SH_MOTION, SH_BULGE, SH_PINCH, SH_GREY, SH_SEPIA, SH_INVERT, SH_HUE, SH_COLOUR, SH_SPLIT, SH_COUNT };
+#define GD_SHADER_VALUES 12
+// One shader effect: its gliding settings (what each stands for: visual.c) and what does not glide.
+typedef struct {
+    Tween v[GD_SHADER_VALUES];
+    float clock;                  // waves and line glitches: their own time, running at their speed
+    float x, y;                   // centre taken from an object that is not followed
+    int center, channel;          // group at the effect's centre, colour channel of its tint
+    unsigned char on, player;     // centred on icon 1 or 2 (0: not)
+    unsigned char flags;          // SF_ bits
+} Shader;
+enum { SF_RELATIVE = 1, SF_INVERT = 2, SF_UPRIGHT = 4, SF_FLIP = 8, SF_DUAL = 16, SF_TINT = 32, SF_HARD = 64,
+       SF_FIXED = 128 };
+// What the camera triggers (and those changing how the picture looks) have set.
+typedef struct {
+    Tween zoom, offx, offy, turn;   // zoom factor, offset in units, rotation in degrees clockwise
+    Tween shiftx, shifty;           // gameplay offset: moves the icon's place on the screen
+    // static camera, per axis (0: x, 1: y): weight against the following camera, the glide from the
+    // former standpoint to the object of the target group
+    Tween hold[2], move[2];
+    int target[2];
+    float from[2];
+    Tween bound[4];                 // weight of the edges left, right, up, down
+    int edge[4];                    // group whose object bounds the view there, 0 = none
+    int hidden;                     // the icon is not shown
+    int bg_id, ground_id;           // background and ground the picture uses
+    // middleground: which one, its height, how fast it and the background scroll
+    int mg_id;
+    Tween mg_y;
+    float mg_mx, mg_my, bg_mx;
+    Shader shader[SH_COUNT];        // shader effects, by SH_ number
+    int shader_bottom, shader_top;  // layers they reach (setup trigger; numbers: see game_draw), top 0: all
+    // groups fixed to the screen (UI trigger)
+    struct { short group, ref; float ax, ay; } ui[4]; int nui;
+} Camera;
+
+#define GD_MAX_GRADIENTS 16        // gradient triggers shown at the same time (by their id)
+typedef struct {                   // data of one gradient trigger
+    int obj, id, layer, blend, ch1, ch2, off, vertex;
+    int side[4];                   // groups of the objects marking up, down, left, right (0: screen edge)
+    float rot;
+} Gradient;
 
 #define GD_GROUPS 10000
 #define GD_MAX_PART 400
@@ -123,23 +221,52 @@ typedef struct {
 
 typedef struct { float x, y, vx, vy, life, max, size, grow, r, g, b, a; int square; } Particle;
 typedef struct { const GdChild *c; int n; const GdFrame *f[12]; } KidSet;
-#define GD_MAX_MOVES 64
-#define GD_MAX_SPAWNS 64
+#define GD_MAX_MOVES 128
+#define GD_MAX_SPAWNS 128
+#define GD_REMAP_DEPTH 4
+// the spawn triggers a command was started through: their group remaps hold for it
+typedef struct { int spawner[GD_REMAP_DEPTH]; unsigned char n; } Chain;
+
+// MV_PLAIN: move by (dx, dy), possibly locked to the icon or the camera; MV_ROTATE: rot degrees
+// around the object of group center; MV_FOLLOW: with the object of group follow (dx, dy factors);
+// MV_SCALE: dx, dy factors; MV_PLAYER_Y: dx speed, dy offset, rot limit; MV_TARGET: until the
+// object of group center (or of the moved group) reaches that of group follow (or the icon);
+// MV_KEYFRAME and MV_ADVANCED keep their state in the fields their code names.
+enum { MV_PLAIN, MV_ROTATE, MV_FOLLOW, MV_SCALE, MV_PLAYER_Y, MV_TARGET, MV_KEYFRAME, MV_ADVANCED };
 typedef struct {
-    int group, easing, center;     // center > 0: pivot group of a rotation
-    int follow;                    // follow trigger: leading group (dx, dy are then factors)
-    float dx, dy, dur, t, rate, done, rot, lx, ly;   // lx, ly: last player position (locked moves)
-    unsigned char lockx, locky;
+    int group, easing, center, follow;
+    int src;                       // object index of the trigger that started it
+    float dx, dy, dur, t, rate, done, rot, lx, ly;   // lx, ly: last icon position (locked moves)
+    float cx, cy;                  // last camera position (moves locked to it)
+    float modx, mody;              // factors of the locked movement
+    unsigned char kind, lockx, locky, camx, camy, paused, axis, player;
+    Chain chain;
 } Move;
-typedef struct { int obj; float left; } PendingSpawn;
-#define GD_MAX_ITEMS 32
-#define GD_MAX_WATCH 48
+typedef struct { int obj, src; float left; unsigned char paused; Chain chain; } PendingSpawn;
+#define GD_MAX_ITEMS 64
+#define GD_MAX_WATCH 64
+#define GD_MAX_TIMERS 16
+#define GD_MAX_LISTEN 32
+
+// options switched by the options trigger
+enum { OPT_HIDE_GROUND = 1, OPT_HIDE_MG = 2, OPT_HIDE_P1 = 4, OPT_HIDE_P2 = 8, OPT_FREE_DUAL = 16,
+       OPT_HIDE_ATTEMPTS = 32, OPT_NO_DEATH_SOUND = 64 };
+
 typedef struct {            // state of the 2.2 logic triggers
     short item[GD_MAX_ITEMS]; int value[GD_MAX_ITEMS]; int nitem;   // item counters
-    struct { int obj, state; } watch[GD_MAX_WATCH]; int nwatch;     // running count / collision / touch triggers
+    // running count / collision / touch triggers
+    struct { int obj, state; Chain chain; } watch[GD_MAX_WATCH]; int nwatch;
     unsigned rng;
+    struct { short group, on; } death[8]; int ndeath;   // groups switched when the icon dies
+    struct { short id, group; unsigned char on, check; float value, rate, stop; Chain chain; } timer[GD_MAX_TIMERS];
+    int ntimer;
+    struct { short item, group; unsigned char multi, done; float at; Chain chain; } at_time[GD_MAX_LISTEN];
+    int nat;
+    struct { unsigned mask[3]; short group; int src; Chain chain; } listen[GD_MAX_LISTEN]; int nlisten;
+    unsigned options;
+    float respawn;          // seconds from a crash to the next attempt, 0: the usual
 } Logic;
-typedef struct { int obj; float x, y, rot; unsigned char used, used2, tdone, off; } UndoEntry;
+typedef struct { int obj; float x, y, rot, kx, ky; unsigned char used, used2, tdone, off; } UndoEntry;
 #define GD_GHOSTS 8
 typedef struct { float x, y, rot, age; int mode, mini, grav; } Ghost;   // one image of the icon's ghost trail
 #define GD_MAX_PULSES 96
@@ -148,6 +275,10 @@ typedef struct {   // pulse trigger: a colour flashed onto a channel or a group 
     float r, g, b, hue, in, hold, out, t;
 } Pulse;
 typedef struct { int group; float from, to, dur, t; } AlphaFade;
+
+#define GD_MAX_COINS 3
+// A coin on its way out of the level, after it was picked up (looks only; age 0: none).
+typedef struct { float x, y, age, drift; unsigned char user, owned; } CoinFly;
 
 typedef struct {
     float x, y, vy;  // vy: px/s, derived from yv (for display/bots only)
@@ -158,6 +289,10 @@ typedef struct {
     float speed;     // units per second
     int on_ground, dead, hold;
     int rising, queued;   // OpenGD m_isRising, _queuedHold
+    float prev_y;         // y before this step's movement (landing on blocks)
+    int ceil_obj;         // 1 + block the icon bumped into with its upper side in the last step
+    int fresh;            // the button went down since the last step
+    float flip_grace, spider_grace;   // seconds left in which blocks forgive: after a gravity flip / spider jump
     int touch_ring, touch_pad;
     int dashing;             // holding a dash orb: straight flight with this slope
     float dash_slope;
@@ -170,8 +305,18 @@ typedef struct {
     int just_held;        // UFO: click happened this step
     float last_ground_y;  // y of the last ground contact (camera logic)
     float boost_t;        // robot: remaining jump boost time
-    float trail[64][2];   // wave trail ring buffer
-    int trail_n, trail_i;
+    float trail[64][2];   // wave trail and streak, ring buffer
+    int trail_n, trail_i, trail_tick;
+    // looks only: the streak behind the icon after orbs and pads and while dashing, and the flame,
+    // the burst at the start and the flame flying off at the end of a dash (ages in seconds)
+    int streak;
+    float streak_idle;                      // since the streak got its last point
+    float dash_age;                         // since the dash began, 0: none
+    float boom_age, boom_x, boom_y;         // burst: age (0 none, < 0 about to start) and place
+    float off_age, off_x, off_y;            // flame flying off
+    float dash_angle, off_angle;            // direction on the screen, degrees clockwise
+    int boom_flip;                          // the burst of a gravity dash orb
+    float slope_t, slope_rot;     // resting on a slope: time left in which that holds, the icon's tilt
 } Player;
 
 typedef struct {
@@ -189,7 +334,10 @@ typedef struct {
     Effect effect[32]; int neffects;   // 2.2 effect animations used by this level
     int ball_type;                // look of the music balls on rods (picked per level load, 1..3)
     float end_x;
-    int start_mode, start_speed;
+    int start_mode, start_speed;      // header: kA2 form, kA4 speed ...
+    int start_mini, start_dual, start_flip, start_mirror, start_group;   // ... kA3, kA8, kA11, kA28, kA36
+    float start_y;                    // height at which the icon appears
+    int fix_radius;                   // header kA39: round hitboxes compare the distance of the centres
     Player p, p2;                 // p2 only exists while dual != 0
     KidSet *kidsets; int nkidsets;
     short kid_of_id[5000];
@@ -208,8 +356,22 @@ typedef struct {
     int has_end, has_jumps;       // level has an end trigger / rotation or teleports (x not monotonic)
     int channel;                  // active trigger channel
     Logic logic;
-    int local;                    // the icon is currently given in the turned movement frame
+    Chain chain;                  // remaps of the command being carried out
+    int *sensors, nsensors;       // state, toggle and stop-jump blocks
+    AreaFx area[GD_MAX_AREAS]; int narea;
+    struct GdTrack *tracks; int ntracks;
+    struct GdAreaObj *areaobj; unsigned area_stamp;
+    const struct GdAreaObj *tinted;   // the object being drawn, if an area changes its colour
+    Emitter *emitters; int nemitters;
+    Burst bursts[GD_MAX_BURSTS]; int nburst;
+    Sound snd[GD_MAX_SOUNDS]; int nsnd;   // asked for since the application last looked
+    int mg_id0, mg_used[3], nmg_used;     // middleground of the header and those triggers change to
+    const GfxImage *mg, *mg2;             // its two layers, set by the application
+    // items and timers the level keeps from one attempt to the next
+    struct { short id; unsigned char timer; float value; } keep[16]; int nkeep;
+    int local;                   // the icon is currently given in the turned movement frame
     int head_safe;                // the icon being checked is inside an H block: head bumps are harmless
+    int head_flip, dart_safe;     // ... inside an F block / a D block
     int *cblocks, ncblocks;       // collision blocks
     struct { int obj; short list[16]; int n; } *lists; int nlists;   // random / sequence lists
     int free;                     // free mode: flying forms are not kept inside a play area
@@ -232,6 +394,13 @@ typedef struct {
     int has_ceil;
     int mirror;                   // mirror portal active
     float mir_x;                  // player screen x (view units), animated
+    float mir_t;                  // anim_t when it was last moved
+    Camera view;                  // camera triggers
+    short grad[GD_MAX_GRADIENTS]; // gradient shown per id: 1 + index into gradients, 0 = none
+    Gradient *gradients; int ngradients;
+    struct { float x, bottom, vh, scale, ox, oy, w, turn_cos, turn_sin; int mirror; } pic;   // the last picture
+    int bg_id0, ground_id0;       // background and ground of the header
+    int bg_used[8], ground_used[8], nbg_used, nground_used;   // those the level's triggers switch to
     float time, cam_x, cam_bottom, cam_target;
     float acc;                    // unsimulated time (fixed 240 Hz steps)
     float prev_x, prev_y, prev_rot; // previous tick, for smooth interpolation
@@ -246,6 +415,10 @@ typedef struct {
     float loud;           // average loudness of the music, 0..1; below 0 without music
     int jumps;                    // button presses of this attempt (end screen)
     float best_percent, percent;
+    // the level's coins in their order, those the player owned before (bits, set by the application)
+    // and the ones being picked up
+    int coin_obj[GD_MAX_COINS], ncoins, coins_owned;
+    CoinFly coin_fly[GD_MAX_COINS];
     char name[96];
     char death_info[96];   // what killed the player last (debug)
     const char *path;
@@ -263,6 +436,10 @@ void game_update(Game *gm, float dt);
 // Draws the world; (vw,vh) is the logical view size in world units (height 320).
 void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, float oy,
                const GfxImage *bg, const GfxImage *ground);
+// The coins picked up in this attempt, as bits (bit 0: the first one).
+int game_coins(const Game *gm);
+// Where a point of the level lies in the last picture.
+void game_screen_pos(const Game *gm, float x, float y, float *sx, float *sy);
 
 // ---- look-ahead support for the test bot
 typedef struct {
@@ -275,7 +452,7 @@ typedef struct {
     int lo, n;                // range of by_x indices whose flags are saved
     unsigned char *flags;     // 4 bytes per object: used, used2, tdone, off
     int cap;
-    float *mpos;              // movers: x, y, rotation
+    float *mpos;              // movers: x, y, rotation, scale factors
     unsigned char *mflags;    // movers: used, used2, tdone, off
     int nm, mcap;
     Move mv[GD_MAX_MOVES]; int nmv;
@@ -302,6 +479,9 @@ typedef struct {
     float *galpha;
     float cam_bottom, ground_y, ceil_y, mir_x, cam_x, percent;
     int has_ceil;
+    Camera view;
+    short grad[GD_MAX_GRADIENTS];
+    AreaFx area[GD_MAX_AREAS]; int narea;
 } GameCheckpoint;
 void game_checkpoint_free(GameCheckpoint *c);
 void game_checkpoint_save(const Game *gm, GameCheckpoint *c);

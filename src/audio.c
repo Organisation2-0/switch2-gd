@@ -45,6 +45,20 @@ static float s_pulse, s_average;
 static struct { char path[720]; double offset; int loop, set; float fade; } s_wanted;   // asked while silent
 // effects, decoded to the format of the device
 static struct { Sint16 *pcm; int frames, at, playing; float gain; } s_sfx[SFX_COUNT];
+// the sounds of the level: decoded files are kept (up to a limit), several can play at once
+#define CACHE 96
+#define CACHE_FRAMES (RATE * 600)   // ten minutes of sound in all
+#define VOICES 24
+static struct { char path[720]; Sint16 *pcm; int frames; } s_cache[CACHE];
+static int s_ncache, s_cached_frames;
+static struct {
+    const Sint16 *pcm;
+    int playing, loop, id, group;
+    double at, rate;
+    int start, end, fade_in, fade_out, done;     // frames
+    float volume, target, step;
+} s_voice[VOICES];
+static float s_gain = 1.0f, s_gain_to = 1.0f, s_gain_step;
 
 static int decode(Track *t, void *out)
 {
@@ -153,7 +167,11 @@ static void mix_music(Uint8 *stream, int len)
     double sum = 0;
     for (int i = 0; i < samples; i += 2) {
         sum += (double)out[i] * out[i] + (double)out[i + 1] * out[i + 1];
-        const float gain = s_volume * s_fade;
+        const float gain = s_volume * s_fade * s_gain;
+        if (s_gain_step != 0) {
+            s_gain += s_gain_step;
+            if ((s_gain_step > 0) == (s_gain >= s_gain_to)) { s_gain = s_gain_to; s_gain_step = 0; }
+        }
         out[i] = (Sint16)(out[i] * gain);
         out[i + 1] = (Sint16)(out[i + 1] * gain);
         if (s_fade_step != 0) {
@@ -186,6 +204,41 @@ static void mix_effects(Sint16 *out, int frames)
     }
 }
 
+static void mix_voices(Sint16 *out, int frames)
+{
+    for (int k = 0; k < VOICES; k++) {
+        if (!s_voice[k].playing) continue;
+        for (int i = 0; i < frames; i++) {
+            if (s_voice[k].at >= s_voice[k].end - 1) {
+                if (!s_voice[k].loop) { s_voice[k].playing = 0; break; }
+                s_voice[k].at = s_voice[k].start;
+            }
+            const int a = (int)s_voice[k].at;
+            const float part = (float)(s_voice[k].at - a);
+            float gain = s_voice[k].volume * s_sfx_volume;
+            if (s_voice[k].done < s_voice[k].fade_in) gain *= (float)s_voice[k].done / s_voice[k].fade_in;
+            if (!s_voice[k].loop && s_voice[k].fade_out > 0) {
+                const double left = (s_voice[k].end - s_voice[k].at) / s_voice[k].rate;
+                if (left < s_voice[k].fade_out) gain *= (float)(left / s_voice[k].fade_out);
+            }
+            for (int c = 0; c < 2; c++) {
+                const float v = s_voice[k].pcm[a * 2 + c] * (1 - part) + s_voice[k].pcm[(a + 1) * 2 + c] * part;
+                out[i * 2 + c] = clip(out[i * 2 + c] + (int)(v * gain));
+            }
+            s_voice[k].at += s_voice[k].rate;
+            s_voice[k].done++;
+            if (s_voice[k].step != 0) {
+                s_voice[k].volume += s_voice[k].step;
+                if ((s_voice[k].step > 0) == (s_voice[k].volume >= s_voice[k].target)) {
+                    s_voice[k].volume = s_voice[k].target;
+                    s_voice[k].step = 0;
+                    if (s_voice[k].target <= 0 && s_voice[k].fade_out < 0) { s_voice[k].playing = 0; break; }
+                }
+            }
+        }
+    }
+}
+
 // Runs on the audio thread (the device is locked meanwhile).
 static void SDLCALL fill(void *user, Uint8 *stream, int len)
 {
@@ -194,6 +247,7 @@ static void SDLCALL fill(void *user, Uint8 *stream, int len)
     if (s_paused) return;
     mix_music(stream, len);
     mix_effects((Sint16 *)stream, len / 4);
+    mix_voices((Sint16 *)stream, len / 4);
 }
 
 static int open_device(void)
@@ -248,6 +302,8 @@ int audio_play(const char *path, double offset, int loop, float fade_in)
     s_fade = fade_in > 0 ? 0.0f : 1.0f;
     s_fade_step = fade_in > 0 ? 1.0f / (fade_in * RATE) : 0.0f;
     s_pulse = s_average = 0;
+    s_gain = s_gain_to = 1.0f;
+    s_gain_step = 0;
     s_paused = 0;
     s_playing = 1;
     SDL_UnlockAudioDevice(s_dev);
@@ -338,6 +394,92 @@ void audio_sfx_stop(void)
     if (!s_dev) return;
     SDL_LockAudioDevice(s_dev);
     for (int k = 0; k < SFX_COUNT; k++) s_sfx[k].playing = 0;
+    for (int k = 0; k < VOICES; k++) s_voice[k].playing = 0;
+    SDL_UnlockAudioDevice(s_dev);
+}
+
+void audio_voices_stop(void)
+{
+    if (!s_dev) return;
+    SDL_LockAudioDevice(s_dev);
+    for (int k = 0; k < VOICES; k++) s_voice[k].playing = 0;
+    SDL_UnlockAudioDevice(s_dev);
+}
+
+void audio_voice_start(const char *path, const AudioVoice *v)
+{
+    if ((s_sfx_volume <= 0 && !s_dev) || open_device()) return;
+    int at = 0;
+    while (at < s_ncache && strcmp(s_cache[at].path, path)) at++;
+    if (at == s_ncache) {
+        if (at >= CACHE || s_cached_frames >= CACHE_FRAMES) return;
+        int frames = 0;
+        Sint16 *pcm = decode_all(path, &frames);
+        if (!pcm || frames < 2) {
+            free(pcm);
+            frames = 0;
+            pcm = NULL;
+            fprintf(stderr, "audio: cannot play %s\n", path);
+        }
+        snprintf(s_cache[at].path, sizeof s_cache[at].path, "%s", path);   // a failure is remembered too
+        s_cache[at].pcm = pcm;
+        s_cache[at].frames = frames;
+        s_cached_frames += frames;
+        s_ncache++;
+    }
+    if (!s_cache[at].pcm) return;
+    const int frames = s_cache[at].frames;
+    int start = (int)(v->start * RATE), end = v->end > 0 ? (int)(v->end * RATE) : frames;
+    if (end > frames) end = frames;
+    if (start < 0 || start >= end - 1) start = 0;
+    SDL_LockAudioDevice(s_dev);
+    int k = 0;
+    while (k < VOICES - 1 && s_voice[k].playing) k++;
+    memset(&s_voice[k], 0, sizeof s_voice[k]);
+    s_voice[k].pcm = s_cache[at].pcm;
+    s_voice[k].loop = v->loop;
+    s_voice[k].id = v->id;
+    s_voice[k].group = v->group;
+    s_voice[k].start = start;
+    s_voice[k].end = end;
+    s_voice[k].at = start;
+    s_voice[k].rate = pow(2.0, v->speed / 12.0);
+    s_voice[k].fade_in = (int)(v->fade_in * RATE);
+    s_voice[k].fade_out = (int)(v->fade_out * RATE);
+    s_voice[k].volume = fminf(fmaxf(v->volume, 0), 4);
+    s_voice[k].playing = 1;
+    s_paused = 0;
+    SDL_UnlockAudioDevice(s_dev);
+}
+
+void audio_voice_change(int id, int group, int stop, int set_volume, float volume, float seconds)
+{
+    if (!s_dev || (!stop && !set_volume)) return;
+    SDL_LockAudioDevice(s_dev);
+    for (int k = 0; k < VOICES; k++) {
+        if (!s_voice[k].playing) continue;
+        if ((id || group) && !(id && s_voice[k].id == id) && !(group && s_voice[k].group == group)) continue;
+        const float to = stop ? 0 : fminf(fmaxf(volume, 0), 4);
+        if (seconds <= 0 || to == s_voice[k].volume) {
+            s_voice[k].volume = to;
+            s_voice[k].step = 0;
+            if (stop) s_voice[k].playing = 0;
+            continue;
+        }
+        s_voice[k].target = to;
+        s_voice[k].step = (to - s_voice[k].volume) / (seconds * RATE);
+        if (stop) s_voice[k].fade_out = -1;   // ends when it is silent
+    }
+    SDL_UnlockAudioDevice(s_dev);
+}
+
+void audio_music_gain(float gain, float seconds)
+{
+    if (!s_dev) return;
+    SDL_LockAudioDevice(s_dev);
+    s_gain_to = fminf(fmaxf(gain, 0), 4);
+    if (seconds <= 0 || s_gain_to == s_gain) { s_gain = s_gain_to; s_gain_step = 0; }
+    else s_gain_step = (s_gain_to - s_gain) / (seconds * RATE);
     SDL_UnlockAudioDevice(s_dev);
 }
 
@@ -351,5 +493,8 @@ void audio_quit(void)
     s_dev = 0;
     s_playing = 0;
     for (int k = 0; k < SFX_COUNT; k++) { free(s_sfx[k].pcm); memset(&s_sfx[k], 0, sizeof s_sfx[k]); }
+    for (int k = 0; k < s_ncache; k++) free(s_cache[k].pcm);
+    s_ncache = s_cached_frames = 0;
+    memset(s_voice, 0, sizeof s_voice);
     close_track(&s_track);
 }

@@ -34,13 +34,19 @@ static void premultiply(unsigned char *px, int w, int h)
     }
 }
 
-int gfx_init(Gfx *g, const char *resdir, int w, int h, int fullscreen)
+void gfx_set_video(Gfx *g, const GfxVideo *video) { gfxb_set_video(g, video); }
+
+int gfx_max_height(const Gfx *g) { return gfxb_max_height(g); }
+
+int gfx_refresh_hz(void) { return gfxb_refresh_hz(); }
+
+int gfx_init(Gfx *g, const char *resdir, int w, int h, const GfxVideo *video)
 {
     memset(g, 0, sizeof *g);
     snprintf(g->resdir, sizeof g->resdir, "%s", resdir);
     g->suffix = "-hd";
     g->fade = 1;
-    int rc = gfxb_init(g, w, h, fullscreen);
+    int rc = gfxb_init(g, w, h, video);
     if (rc) {
         fprintf(stderr, "graphics init: %s\n", SDL_GetError());
         return rc;
@@ -84,7 +90,23 @@ void gfx_quit(Gfx *g)
     SDL_Quit();
 }
 
-void gfx_begin_frame(Gfx *g) { g->frame++; gfxb_begin_frame(); }
+void gfx_begin_frame(Gfx *g) { g->frame++; gfxb_begin_frame(g); }
+
+void gfx_effects(Gfx *g, const GfxEffects *fx)
+{
+    (void)g;
+    if (fx->any) gfxb_effects(fx->v);
+}
+
+void gfx_layer_begin(Gfx *g) { (void)g; gfxb_layer_begin(); }
+
+void gfx_layer_end(Gfx *g, const GfxEffects *fx)
+{
+    (void)g;
+    gfxb_layer_end(fx->any ? fx->v : NULL);
+}
+
+void gfx_window_point(Gfx *g, int px, int py, float *x, float *y) { gfxb_window_point(g, px, py, x, y); }
 
 void gfx_present(Gfx *g) { (void)g; gfxb_present(); }
 
@@ -196,6 +218,29 @@ void gfx_icon_draw(Gfx *g, const char *type, int id, float x, float y, float rot
     }
 }
 
+// A corner as the mirror portal and the camera rotation show it.
+static SDL_FPoint placed(const Gfx *g, float x, float y)
+{
+    if (g->mirror) x = g->mir_w - x;
+    if (g->turned) {
+        const float dx = x - g->turn_x, dy = y - g->turn_y;
+        x = g->turn_x + dx * g->turn_cos - dy * g->turn_sin;
+        y = g->turn_y + dx * g->turn_sin + dy * g->turn_cos;
+    }
+    return (SDL_FPoint){x, y};
+}
+
+void gfx_quad_colors(Gfx *g, const float px[4], const float py[4], const GdColorF c[4], int additive)
+{
+    SDL_FPoint pos[4], uv[4] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    SDL_Color cols[4];
+    for (int i = 0; i < 4; i++) {
+        pos[i] = placed(g, px[i], py[i]);
+        cols[i] = col(c[i]);
+    }
+    gfxb_quad(NULL, pos, uv, cols, additive);
+}
+
 static void quad(Gfx *g, GfxTex *tex, const float px[4], const float py[4],
                  const float u[4], const float v[4], SDL_Color c, int additive)
 {
@@ -220,7 +265,7 @@ static void quad(Gfx *g, GfxTex *tex, const float px[4], const float py[4],
         SDL_FPoint pos[4], uv[4];
         for (int k = 0; k < 4; k++) {
             const int i = idx[k];
-            pos[k] = (SDL_FPoint){g->mirror ? g->mir_w - vx[i] : vx[i], vy[i]};
+            pos[k] = placed(g, vx[i], vy[i]);
             uv[k] = (SDL_FPoint){vu[i], vv[i]};
         }
         gfxb_quad(tex, pos, uv, cols, additive);

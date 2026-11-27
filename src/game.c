@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "game.h"
+#include "game_int.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -11,7 +11,6 @@
 #include "objz.h"
 #include "phystab.h"
 
-#define STEP (1.0f / 240.0f)
 
 static const float k_speeds[5] = {251.16f, 311.58f, 387.42f, 468.0f, 576.0f};
 
@@ -130,12 +129,26 @@ static void parse_header(Game *gm, const char *h)
                 }
         } else if (!strcmp(key, "kA6")) {
             gm->bg_id = atoi(val) > 0 ? atoi(val) : 1;
+        } else if (!strcmp(key, "kA25")) {
+            gm->mg_id0 = atoi(val);
         } else if (!strcmp(key, "kA7")) {
             gm->ground_id = atoi(val) > 0 ? atoi(val) : 1;
         } else if (!strcmp(key, "kA4")) {
             gm->start_speed = atoi(val);
         } else if (!strcmp(key, "kA2")) {
             gm->start_mode = atoi(val);
+        } else if (!strcmp(key, "kA3")) {
+            gm->start_mini = atoi(val) != 0;
+        } else if (!strcmp(key, "kA8")) {
+            gm->start_dual = atoi(val) != 0;
+        } else if (!strcmp(key, "kA11")) {
+            gm->start_flip = atoi(val) != 0;
+        } else if (!strcmp(key, "kA28")) {
+            gm->start_mirror = atoi(val) != 0;
+        } else if (!strcmp(key, "kA36")) {
+            gm->start_group = atoi(val);
+        } else if (!strcmp(key, "kA39")) {
+            gm->fix_radius = atoi(val) != 0;
         } else if (!strcmp(key, "kA13")) {
             gm->song_offset = (float)atof(val);
         }
@@ -290,16 +303,15 @@ static void classify_visual(Game *gm, Gfx *g, Obj *o, const GdObject *src)
     }
 }
 
-// Type and hitbox from the OpenGD tables (phystab.c). Objects the table does not know about,
-// or marks as decoration, never collide.
+// Type and hitbox from phystab.c (read out of the game). Objects the table does not know about do
+// not collide.
 static void apply_phys(Obj *o, int id)
 {
     if (o->type == OT_TRIGGER) return;
     const GdPhys *ph = gd_phys_find(id);
-    int t = ph ? ph->type : -1;
     ObjType ot = OT_DECO;
     int sub = 0;
-    switch (t) {
+    switch (ph ? ph->type : -1) {
     case 0: ot = OT_SOLID; break;
     case 25:   // slopes; the sloped spike pits kill
         ot = id == 366 || id == 367 ? OT_HAZARD : OT_SOLID;
@@ -322,16 +334,25 @@ static void apply_phys(Obj *o, int id)
     case 26: ot = OT_PORTAL; sub = P_WAVE; break;
     case 27: ot = OT_PORTAL; sub = P_ROBOT; break;
     case 33: ot = OT_PORTAL; sub = P_SPIDER; break;
-    case 28: ot = OT_PORTAL; sub = P_OTHER; break;
+    case 40: ot = OT_PORTAL; sub = P_SWING; break;
+    case 41: ot = OT_PORTAL; sub = P_GRAV_TOGGLE; break;
+    case 42: ot = OT_PORTAL; sub = P_TELEPORT; break;
     case 8: ot = OT_PAD; sub = K_YELLOW; break;
     case 9: ot = OT_PAD; sub = K_PINK; break;
     case 10: ot = OT_PAD; sub = K_BLUE; break;
     case 34: ot = OT_PAD; sub = K_RED; break;
+    case 43: ot = OT_PAD; sub = K_SPIDER; break;
     case 11: ot = OT_ORB; sub = K_YELLOW; break;
     case 12: ot = OT_ORB; sub = K_PINK; break;
     case 13: ot = OT_ORB; sub = K_BLUE; break;
     case 29: ot = OT_ORB; sub = K_GREEN; break;
     case 35: ot = OT_ORB; sub = K_RED; break;
+    case 44: ot = OT_ORB; sub = K_BLACK; break;
+    case 45: ot = OT_ORB; sub = K_DASH; break;
+    case 46: ot = OT_ORB; sub = K_DASH_FLIP; break;
+    case 47: ot = OT_ORB; sub = K_SPIDER; break;
+    case 48: ot = OT_ORB; sub = K_TELEPORT; break;
+    case 49: ot = OT_ORB; sub = K_TOGGLE; break;
     case 20:
         ot = OT_SPEED;
         sub = id == 200 ? 0 : id == 201 ? 1 : id == 202 ? 2 : id == 203 ? 3 : 4;
@@ -340,34 +361,14 @@ static void apply_phys(Obj *o, int id)
     }
     o->type = ot;
     o->sub = sub;
-    o->rad = 0;
-    o->hw = o->hh = o->hx = o->hy = 0;
-    // objects newer than the table: swing portal, special orbs and pads, force blocks
-    if (id == 1859) {   // H block (invisible helper)
+    o->rad = o->tilt = 0;
+    o->hw = o->hh = o->hx = o->hy = o->bw = o->bh = 0;
+    if (id == 1859 || id == 2866 || id == 1755 || id == 1829) {   // H, F, D and S block
         o->type = OT_HBLOCK;
-        o->main = o->glow = NULL;
+        o->sub = id == 2866 ? SB_FLIP : id == 1755 ? SB_DART : id == 1829 ? SB_STOPDASH : SB_HEAD;
+        o->main = o->detail = o->glow = NULL;
         o->hw = 15.0f * fabsf(o->sx);
         o->hh = 15.0f * fabsf(o->sy);
-        return;
-    }
-    if (id == 1933) {
-        o->type = OT_PORTAL;
-        o->sub = P_SWING;
-        o->hw = 17.0f;
-        o->hh = 43.0f;
-        return;
-    }
-    if (id == 1594 || id == 3004 || id == 3027) {
-        o->type = OT_ORB;
-        o->sub = id == 1594 ? K_TOGGLE : id == 3004 ? K_SPIDER : K_TELEPORT;
-        o->hw = o->hh = 18.0f * fabsf(o->sx);
-        return;
-    }
-    if (id == 3005) {
-        o->type = OT_PAD;
-        o->sub = K_SPIDER;
-        o->hw = 13.0f;
-        o->hh = 6.0f;
         return;
     }
     if (id == 2069 || id == 3645) {   // force block (square) / force circle
@@ -376,25 +377,25 @@ static void apply_phys(Obj *o, int id)
         o->hh = 15.0f * fabsf(o->sy);
         return;
     }
-    // black orb, dash orbs, teleport portals
-    if (id == 1330 || id == 1704 || id == 1751) {
-        o->type = OT_ORB;
-        o->sub = id == 1330 ? K_BLACK : id == 1704 ? K_DASH : K_DASH_FLIP;
-        o->hw = o->hh = 18.0f;
-        return;
-    }
-    if (id == 747 || id == 2902) {
-        o->type = OT_PORTAL;
-        o->sub = P_TELEPORT;
-        o->hw = 6.0f;      // fires only close to its centre (the exit may sit right behind spikes)
+    if (!ph || ot == OT_DECO) return;
+    if (ot == OT_PORTAL && sub == P_TELEPORT) {
+        // Narrower than the table says: with the full width the icon would leave levels like
+        // Deadlocked right inside the spikes behind the exit.
+        o->hw = 6.0f;
         o->hh = 45.0f;
         return;
     }
-    if (!ph || ot == OT_DECO) return;
 
-    // Hitbox rectangle relative to the object centre, then flip -> rotate (clockwise) -> AABB.
+    // Blocks and slopes only know quarter turns: any other angle counts as none (and a block turned
+    // by 450 degrees keeps its upright box).
+    float rot = o->rot;
+    if (ot == OT_SOLID) {
+        const float q = rot / 90.0f;
+        if (fabsf(q - roundf(q)) > 0.001f || (!o->slope && fabsf(rot) > 270.5f && ((int)roundf(q) & 1))) rot = 0;
+    }
+    // Hitbox rectangle relative to the object centre, then flip -> rotate (clockwise) -> bounds.
     float rx[2] = {ph->x, ph->x + ph->w}, ry[2] = {ph->y, ph->y + ph->h};
-    float r = o->rot * 3.14159265f / 180.0f, c = cosf(r), s = sinf(r);
+    float r = rot * 3.14159265f / 180.0f, c = cosf(r), s = sinf(r);
     float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
     for (int i = 0; i < 4; i++) {
         float px = rx[i & 1] * o->sx, py = ry[i >> 1] * o->sy;
@@ -408,7 +409,14 @@ static void apply_phys(Obj *o, int id)
     o->hh = (maxy - miny) * 0.5f;
     o->hx = (maxx + minx) * 0.5f;
     o->hy = (maxy + miny) * 0.5f;
-    if (ot == OT_HAZARD) o->rad = ph->radius;
+    o->bw = ph->w * fabsf(o->sx) * 0.5f;
+    o->bh = ph->h * fabsf(o->sy) * 0.5f;
+    if (fabsf(rot / 90.0f - roundf(rot / 90.0f)) > 0.001f) o->tilt = -r;   // the box itself is turned
+    if (ot == OT_HAZARD && ph->radius > 0) {   // round, centred on the object
+        o->rad = ph->radius * fmaxf(fabsf(o->sx), fabsf(o->sy));
+        o->hx = o->hy = o->tilt = 0;
+        o->hw = o->hh = o->rad;
+    }
     if (o->slope) {
         // the unrotated shape has its right angle bottom right; find where flip + rotation put it
         const float px = (ph->x + ph->w) * o->sx, py = ph->y * o->sy;
@@ -419,17 +427,37 @@ static void apply_phys(Obj *o, int id)
 
 static int add_effect(Game *gm, Gfx *g, int id);
 
+// Commands the engine acts on (colour triggers are known by their channel).
+static int is_command(int id)
+{
+    static const short ids[] = {
+        22, 23, 24, 25, 26, 27, 28, 32, 33, 55, 56, 57, 58, 59, 901, 1006, 1007, 1049, 1268, 1346, 1347, 1520, 1585,
+        1595, 1611, 1612, 1613, 1616, 1811, 1812, 1814, 1815, 1817, 1912, 1913, 1914, 1915, 1916, 1917, 1932, 1934,
+        1935, 2015, 2062, 2066, 2067, 2068, 2899, 2900, 2901, 2903, 2904, 2905, 2907, 2909, 2910, 2911, 2912, 2913,
+        2914, 2915, 2916, 2917, 2919, 2920, 2921, 2922, 2923, 2924, 2925, 2999, 3006, 3007, 3008, 3009, 3010, 3011,
+        3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020, 3021, 3022, 3023, 3024, 3029, 3030, 3031, 3033, 3600,
+        3602, 3603, 3604, 3605, 3606, 3607, 3608, 3609, 3612, 3613, 3614, 3615, 3617, 3618, 3619, 3620, 3641, 3660,
+        3661};
+    for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++)
+        if (ids[i] == id) return 1;
+    return 0;
+}
+
+static TData *keep_properties(const GdObject *src)
+{
+    TData *d = malloc(sizeof *d + (size_t)src->nprops * sizeof(GdProp));
+    if (!d) return NULL;
+    d->nprops = src->nprops;
+    memcpy(d->prop, src->props, (size_t)src->nprops * sizeof(GdProp));
+    d->text = src->text ? strdup(src->text) : NULL;
+    return d;
+}
+
 static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
 {
     classify_visual(gm, g, o, src);
     const int id = src->id;
-    // triggers of newer versions that the engine acts on
-    const int newer = id == 32 || id == 33 || id == 1520 || id == 2900 || id == 1935 || id == 3600 || id == 1917 || id == 2066 || id == 1347 || id == 1914 ||
-                      id == 1611 || id == 1811 || id == 1817 || id == 1912 || id == 2068 || id == 3607 || id == 1595 || id == 1815 || id == 3022 ||
-                      id == 1585;
-    const int enter = (id >= 22 && id <= 28) || (id >= 55 && id <= 59) || id == 1915 || newer;
-    if (o->type != OT_TRIGGER && (enter || id == 901 || id == 1007 || id == 1049 || id == 1268 || id == 1346 || id == 1006 ||
-                                  id == 1616)) {
+    if (o->type != OT_TRIGGER && is_command(id)) {
         o->type = OT_TRIGGER;
         o->main = o->detail = o->back = o->extra = NULL;
     }
@@ -438,7 +466,7 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->tgroup = (int)gd_obj_prop(src, 51, 0);
         o->tdx = gd_obj_prop(src, 28, 0);
         o->tdy = gd_obj_prop(src, 29, 0);
-        o->tdur = id == 901 || id == 1007 ? gd_obj_prop(src, 10, 0) : o->tdur;
+        if (trigger_channel(id) == -1) o->tdur = fmaxf(gd_obj_prop(src, 10, 0), 0);   // colour ones have it
         o->teasing = (int)gd_obj_prop(src, 30, 0);
         o->trate = gd_obj_prop(src, 85, 2);
         o->tact = (int)gd_obj_prop(src, 56, 0);
@@ -462,7 +490,6 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
             o->tb = gd_obj_prop(src, 9, 255);
             o->tcopy = (int)gd_obj_prop(src, 50, 0);
         }
-        if (id == 1346 || id == 1616) o->tdur = gd_obj_prop(src, 10, 0);
         if (id == 1520) o->tdur = gd_obj_prop(src, 10, 0.5f);
         o->touch = gd_obj_prop(src, 11, 0) != 0;
         o->tground = id == 29 && gd_obj_prop(src, 14, 0) != 0;   // old BG trigger with "tint ground"
@@ -475,7 +502,7 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
             o->tcopy = (int)gd_obj_prop(src, 77, 0);                // target value / amount
             o->tcenter = (int)gd_obj_prop(src, 88, 0);              // comparison: equal, larger, smaller
         }
-        if (id == 1815) {   // collision: two block ids, or the icon and one block id
+        if (id == 1815 || id == 3609) {   // collision: two block ids, or the icon and one block id
             o->ttarget = (int)gd_obj_prop(src, 80, 0);
             o->tcopy = (int)gd_obj_prop(src, 95, 0);
             o->tplayer = gd_obj_prop(src, 138, 0) != 0 || gd_obj_prop(src, 200, 0) != 0;
@@ -505,6 +532,15 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->glow = sibling(g, gd_object_frame(id), "_001.png", "_glow_001.png");
     int hidden_no_sprite = o->type == OT_HIDDEN && !o->main;
     apply_phys(o, src->id);
+    if (id == 142 || id == 1329) {   // secret and user coins: picked up by touching them
+        o->type = OT_COIN;
+        o->sub = id == 142 ? (int)gd_obj_prop(src, 12, 0) : 0;   // official levels number them
+        o->hw = 20.0f * fabsf(o->sx);
+        o->hh = 20.0f * fabsf(o->sy);
+        o->hx = o->hy = o->rad = o->tilt = o->spin = 0;
+        o->detail = o->extra = o->glow = NULL;
+        if (gd_obj_prop(src, 21, 0) == 0) o->ch_main = o->ch_detail = CH_WHITE;
+    }
     {
         const char *name = gd_object_frame(id);
         o->beat = o->type == OT_ORB ? 2 : name && !strncmp(name, "d_ball_", 7) ? 1 : 0;
@@ -537,6 +573,25 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
                  : id == 1912 ? gd_obj_prop(src, 10, 50.0f)        // 1912: random chance in percent
                  : id == 1520 ? gd_obj_prop(src, 75, 1.0f) : 0;    // 1520: shake strength
         if (id == 1520) o->trate = gd_obj_prop(src, 84, 0);        // ... and seconds between jolts
+        if (id == 1913) o->value = fminf(fmaxf(gd_obj_prop(src, 371, 1.0f), 0.2f), 5.0f);   // zoom factor
+        if (id == 1914) o->ttarget = (int)gd_obj_prop(src, 101, 0);       // 1: x only, 2: y only
+        if (id == 1916) o->ttarget = (int)gd_obj_prop(src, 101, 0);
+        if (id == 2062) o->ttarget = (int)gd_obj_prop(src, 164, 0);       // 1 left, 2 right, 3 up, 4 down
+        if (id == 2067) {   // scale: factors (keys 153 / 154: divide by them instead)
+            const float kx = gd_obj_prop(src, 150, 1.0f), ky = gd_obj_prop(src, 151, 1.0f);
+            o->tdx = gd_obj_prop(src, 153, 0) != 0 && kx != 0 ? 1.0f / kx : kx;
+            o->tdy = gd_obj_prop(src, 154, 0) != 0 && ky != 0 ? 1.0f / ky : ky;
+        }
+        if (id == 1814) {   // follow the player's height
+            o->value = gd_obj_prop(src, 90, 1.0f);    // speed
+            o->tdy = gd_obj_prop(src, 92, 0);         // offset
+            o->fymod = gd_obj_prop(src, 105, 0);      // fastest step per frame, 0 = no limit
+        }
+        if (id == 3029 || id == 3030) o->ttarget = (int)gd_obj_prop(src, 533, 0);
+    }
+    if (id == 3610 || id == 3611) {   // 2.2 damage square / circle: hitboxes without a picture
+        o->main = o->detail = o->glow = NULL;
+        o->kidset = -1;
     }
     // keep objects without a sprite only if they collide (invisible blocks, hitbox-only objects)
     if (hidden_no_sprite && o->type == OT_DECO) o->type = OT_HIDDEN;
@@ -544,7 +599,15 @@ static void classify(Game *gm, Gfx *g, Obj *o, const GdObject *src)
         o->type = OT_SENSOR;
         o->main = o->glow = NULL;
         o->value = gd_obj_prop(src, 80, 0);
+        o->sub = SN_BLOCK;
     }
+    if (id == 3640 || id == 3643 || id == 1813) {   // blocks that act when the icon touches them
+        o->type = OT_SENSOR;
+        o->sub = id == 3640 ? SN_STATE : id == 3643 ? SN_TOGGLE : SN_NOBUFFER;
+        o->main = o->detail = o->glow = NULL;
+        o->kidset = -1;
+    }
+    if (o->type == OT_TRIGGER || o->type == OT_SENSOR || id == 3032 || id == 2065) o->data = keep_properties(src);
 }
 
 // ---------------------------------------------------------------- loading
@@ -584,8 +647,8 @@ static int add_hsv(Game *gm, const float v[5])
 // Triggers and helpers of newer versions only have editor icons: they are never drawn.
 static int editor_only(int id)
 {
-    static const short r[][2] = {{1520,1520},{1585,1585},{1595,1595},{1611,1620},{1755,1755},{1811,1819},{1829,1829},{1912,1917},
-        {1931,1935},{2015,2016},{2062,2068},{2899,2905},{2907,2907},{2909,2925},{2999,2999},{3006,3033},{3092,3092},{3600,3600},
+    static const short r[][2] = {{1520,1520},{1585,1585},{1595,1595},{1611,1620},{1755,1755},{1811,1819},{1829,1829},{1859,1859},{1912,1917},
+        {1931,1935},{2015,2016},{2062,2068},{2866,2866},{2899,2905},{2907,2907},{2909,2925},{2999,2999},{3006,3033},{3092,3092},{3600,3600},
         {3602,3620},{3640,3643},{3660,3662}};
     for (size_t i = 0; i < sizeof r / sizeof r[0]; i++)
         if (id >= r[i][0] && id <= r[i][1]) return 1;
@@ -658,10 +721,35 @@ static void add_teleport_exits(GdLevel *lvl)
         if (all[i].id != 747) continue;
         GdObject *e = &all[lvl->count++];
         *e = all[i];
+        e->text = NULL;
         e->id = 749;
         e->y += gd_obj_prop(&all[i], 54, 0);
         e->flipx = !e->flipx;   // it opens the other way
     }
+}
+
+// A gradient trigger: two colour channels spread over the area between the objects of up to four
+// groups; sides without a group reach to the screen edge.
+static void add_gradient(Game *gm, int obj, const GdObject *s)
+{
+    if (!(gm->ngradients & 31)) {
+        void *p = realloc(gm->gradients, (size_t)(gm->ngradients + 32) * sizeof *gm->gradients);
+        if (!p) return;
+        gm->gradients = p;
+    }
+    Gradient *d = &gm->gradients[gm->ngradients++];
+    memset(d, 0, sizeof *d);
+    d->obj = obj;
+    d->id = (int)gd_obj_prop(s, 209, 0);
+    if (d->id < 0 || d->id >= GD_MAX_GRADIENTS) d->id = 0;
+    d->layer = (int)gd_obj_prop(s, 202, 1);
+    d->blend = (int)gd_obj_prop(s, 174, 0);
+    d->ch1 = (int)gd_obj_prop(s, 21, 0);
+    d->ch2 = (int)gd_obj_prop(s, 22, 0);
+    d->off = gd_obj_prop(s, 208, 0) != 0 || (d->ch1 <= 0 && d->ch2 <= 0);
+    d->vertex = gd_obj_prop(s, 207, 0) != 0;
+    for (int i = 0; i < 4; i++) d->side[i] = (int)gd_obj_prop(s, 203 + i, 0);
+    d->rot = s->rot;
 }
 
 int game_load(Game *gm, Gfx *g, const char *path, const char *data)
@@ -674,6 +762,8 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
     // the original picks one look for all rod balls of a level at random
     gm->ball_type = getenv("GD_HIDDEN") ? 2 : 1 + (int)(SDL_GetPerformanceCounter() % 3);
     parse_header(gm, lvl.header);
+    gm->bg_id0 = gm->bg_id;
+    gm->ground_id0 = gm->ground_id;
     gm->pulse = gm->loud = -1.0f;
     memcpy(gm->ch0, gm->ch, sizeof gm->ch);
     gm->ch0_valid = 1;
@@ -727,8 +817,24 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
         for (int k = 0; k < s->ngroups && k < GD_MAX_GROUPS; k++)
             if (s->groups[k] > 0 && s->groups[k] < GD_GROUPS) o->grp[o->ngrp++] = (short)s->groups[k];
         o->kidset = -1;
+        o->kx = o->ky = 1;
         classify(gm, g, o, s);
-        if (s->id == 749) {   // teleport exit: looks like a portal, does nothing
+        // "no touch" (key 121) makes any object mere decoration
+        o->notouch = o->type != OT_TRIGGER && gd_obj_prop(s, 121, 0) != 0;
+        if (o->type == OT_TRIGGER && s->id == 2903) add_gradient(gm, gm->n, s);
+        if (o->type == OT_TRIGGER && s->id == 3031) {
+            const int mg = (int)gd_obj_prop(s, 533, 0);
+            int k = 0;
+            while (k < gm->nmg_used && gm->mg_used[k] != mg) k++;
+            if (mg > 0 && k == gm->nmg_used && k < 3) gm->mg_used[gm->nmg_used++] = mg;
+        }
+        if (o->type == OT_TRIGGER && o->ttarget > 0 && (s->id == 3029 || s->id == 3030)) {
+            int *list = s->id == 3029 ? gm->bg_used : gm->ground_used, *n = s->id == 3029 ? &gm->nbg_used : &gm->nground_used;
+            int k = 0;
+            while (k < *n && list[k] != o->ttarget) k++;
+            if (k == *n && *n < 8) list[(*n)++] = o->ttarget;
+        }
+        if (s->id == 749 || s->id == 2064) {   // teleport exit: looks like a portal, does nothing
             o->type = OT_PORTAL;
             o->sub = P_OTHER;
             o->hw = o->hh = 0;
@@ -783,6 +889,7 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
                 }
             }
         }
+        o->enter_ch = (unsigned char)gd_obj_prop(s, 343, 0);
         o->no_fade = gd_obj_prop(s, 64, 0) != 0;
         o->no_enter = gd_obj_prop(s, 67, 0) != 0;
         // the black sludge is not in the colour table
@@ -801,9 +908,11 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
             if (s->id >= 91 && s->id <= 96) o->solid_fill = 1;
         }
         if (o->main && gd_object_frame(s->id) && strstr(gd_object_frame(s->id), "_looped_")) add_loop(gm, g, s->id);
-        if (o->type == OT_HIDDEN && !o->main) continue;
+        // invisible objects stay if they are in a group: triggers use them to mark places
+        if (o->type == OT_HIDDEN && !o->main && !o->ngrp && !o->data) continue;
         o->nodraw = o->type != OT_TRIGGER && (gd_obj_prop(s, 135, 0) != 0 || (o->type != OT_PORTAL && o->type != OT_ORB &&
                     o->type != OT_PAD && editor_only(s->id)));
+        if (o->type == OT_SENSOR || s->id == 2065 || s->id == 3610 || s->id == 3611) o->nodraw = 1;
         if (s->nlist > 1 && (s->id == 2068 || s->id == 3607)) {
             gm->lists = realloc(gm->lists, (size_t)(gm->nlists + 1) * sizeof *gm->lists);
             gm->lists[gm->nlists].obj = gm->n;
@@ -848,8 +957,23 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
     free(fill);
     unsigned char *moving = calloc(GD_GROUPS + 1, 1);
     for (int i = 0; i < gm->n; i++)
-        if (gm->obj[i].type == OT_TRIGGER && (gm->obj[i].tid == 901 || gm->obj[i].tid == 1346) && gm->obj[i].tgroup > 0 && gm->obj[i].tgroup < GD_GROUPS)
+        if (gm->obj[i].type == OT_TRIGGER && (gm->obj[i].tid == 901 || gm->obj[i].tid == 1346 || gm->obj[i].tid == 1347 ||
+            gm->obj[i].tid == 1814 || gm->obj[i].tid == 2067 || gm->obj[i].tid == 3016 || gm->obj[i].tid == 3033) &&
+            gm->obj[i].tgroup > 0 && gm->obj[i].tgroup < GD_GROUPS)
             moving[gm->obj[i].tgroup] = 1;
+    // a spawn trigger may hand a command another group: those can move too
+    for (int i = 0; i < gm->n; i++) {
+        const TData *d = gm->obj[i].data;
+        if (!d || !d->text || gm->obj[i].tid != 1268) continue;
+        for (const char *c = d->text; *c;) {
+            while (*c && *c != '.') c++;
+            if (!*c) break;
+            const int to = atoi(++c);
+            if (to > 0 && to < GD_GROUPS) moving[to] = 1;
+            while (*c && *c != '.') c++;
+            if (*c) c++;
+        }
+    }
     gm->movers = malloc(sizeof(int) * (size_t)(gm->n + 1));
     gm->nx = 0;
     gm->nmov = 0;
@@ -860,9 +984,12 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
         gm->by_z[i] = i;
         if (o->type == OT_TRIGGER && o->tid == 3600) gm->has_end = 1;
         if (o->type == OT_TRIGGER && o->tid == 3022) gm->has_jumps = 1;
-        if (o->type == OT_SENSOR) {
+        if (o->type == OT_SENSOR && o->sub == SN_BLOCK && !o->notouch) {
             if (!(gm->ncblocks & 63)) gm->cblocks = realloc(gm->cblocks, (size_t)(gm->ncblocks + 64) * sizeof *gm->cblocks);
             gm->cblocks[gm->ncblocks++] = i;
+        } else if (o->type == OT_SENSOR && o->sub != SN_BLOCK && !o->notouch) {
+            if (!(gm->nsensors & 63)) gm->sensors = realloc(gm->sensors, (size_t)(gm->nsensors + 64) * sizeof *gm->sensors);
+            gm->sensors[gm->nsensors++] = i;
         }
         if (o->type == OT_TRIGGER && o->tid == 2900) {
             if (!(gm->nturns & 63)) gm->turns = realloc(gm->turns, (size_t)(gm->nturns + 64) * sizeof *gm->turns);
@@ -872,17 +999,41 @@ int game_load(Game *gm, Gfx *g, const char *path, const char *data)
             ((o->type == OT_PORTAL || o->type == OT_ORB) && o->tgroup > 0 &&
              (o->sub == (o->type == OT_PORTAL ? P_TELEPORT : K_TELEPORT)))) gm->has_jumps = 1;
         // movers are collected separately (the look-ahead saves and restores them)
-        const int inert = o->type == OT_DECO || o->type == OT_HIDDEN;
+        const int inert = o->type == OT_DECO || o->type == OT_HIDDEN || o->notouch;
         if (inert) continue;   // by_x and movers only hold what the simulation needs (drawing uses by_z)
         if (!o->mover) gm->by_x[gm->nx++] = i;
         else gm->movers[gm->nmov++] = i;
     }
     free(moving);
+    // the coins in their order: by their number, else along the level
+    gm->ncoins = 0;
+    for (int i = 0; i < gm->n; i++) {
+        const Obj *o = &gm->obj[i];
+        if (o->type != OT_COIN || o->notouch || gm->ncoins >= GD_MAX_COINS) continue;
+        int at = gm->ncoins++;
+        for (; at > 0; at--) {
+            const Obj *b = &gm->obj[gm->coin_obj[at - 1]];
+            if (b->sub < o->sub || (b->sub == o->sub && b->x <= o->x)) break;
+            gm->coin_obj[at] = gm->coin_obj[at - 1];
+        }
+        gm->coin_obj[at] = i;
+    }
     g_sort_obj = gm->obj;
     qsort(gm->by_z, (size_t)gm->n, sizeof(int), cmp_z);
     qsort(gm->by_x, (size_t)gm->nx, sizeof(int), cmp_x);
     gm->end_x = maxx + 380;
+    // the icon appears just above the floor, or at the height of the last object of the spawn group
+    gm->start_y = 15;
+    if (gm->start_group > 0 && gm->start_group < GD_GROUPS) {
+        float last = -1e9f;
+        for (int k = gm->grp_start[gm->start_group]; k < gm->grp_start[gm->start_group + 1]; k++) {
+            const Obj *o = &gm->obj[gm->grp_items[k]];
+            if (o->x >= last) { last = o->x; gm->start_y = o->y; }
+        }
+    }
     (void)g_sort_gfx;
+    motion_load(gm);
+    visual_load(gm);
     game_reset(gm);
     gm->attempts = 1;
     return 0;
@@ -901,7 +1052,6 @@ void game_set_skin(Game *gm, const int icon[IC_COUNT], const float c1[3], const 
 
 void game_free(Game *gm)
 {
-    free(gm->obj);
     free(gm->by_z);
     free(gm->by_x);
     free(gm->kidsets);
@@ -914,8 +1064,45 @@ void game_free(Game *gm)
     free(gm->turns);
     free(gm->cblocks);
     free(gm->lists);
+    free(gm->gradients);
+    free(gm->sensors);
+    motion_free(gm);
+    visual_free(gm);
+    for (int i = 0; i < gm->n; i++)
+        if (gm->obj[i].data) free(gm->obj[i].data->text);
+    for (int i = 0; i < gm->n; i++) free(gm->obj[i].data);
+    free(gm->obj);
     memset(gm, 0, sizeof *gm);
 }
+
+// Makes an object kx times as wide and ky times as high, around its own position.
+void gm_obj_scale(Obj *o, float kx, float ky)
+{
+    // the hitbox lies in the level: for an object placed on its side the factors change places
+    const int side = fabsf(sinf(o->rot0 * 3.14159265f / 180.0f)) > 0.7f;
+    const float wx = fabsf(side ? ky : kx), wy = fabsf(side ? kx : ky);
+    const float before = fmaxf(fabsf(o->sx), fabsf(o->sy));
+    o->sx *= kx;
+    o->sy *= ky;
+    o->hw *= wx;
+    o->hh *= wy;
+    o->bw *= fabsf(kx);
+    o->bh *= fabsf(ky);
+    o->hx *= side ? ky : kx;
+    o->hy *= side ? kx : ky;
+    if (o->rad > 0 && before > 0) {
+        o->rad *= fmaxf(fabsf(o->sx), fabsf(o->sy)) / before;
+        o->hw = o->hh = o->rad;
+    } else if (o->tilt != 0) {
+        const float c = fabsf(cosf(o->tilt)), s = fabsf(sinf(o->tilt));
+        o->hw = c * o->bw + s * o->bh;
+        o->hh = s * o->bw + c * o->bh;
+    }
+    o->kx *= kx;
+    o->ky *= ky;
+}
+
+static void set_ctr(Game *gm, int mode, float obj_y);
 
 void game_reset(Game *gm)
 {
@@ -926,31 +1113,40 @@ void game_reset(Game *gm)
     gm->npu = gm->naf = 0;
     gm->ghost_on = 0;
     memset(gm->ghost, 0, sizeof gm->ghost);
+    memset(gm->coin_fly, 0, sizeof gm->coin_fly);
     gm->shake_left = 0;
     Player *p = &gm->p;
     memset(p, 0, sizeof *p);
     memset(&gm->p2, 0, sizeof gm->p2);
-    p->x = 0; p->y = 15; p->grav = 1;
+    p->x = 0; p->y = gm->start_y; p->grav = gm->start_flip ? -1 : 1;
     p->gscale = 1.0f;
     gm->frame = gm->next_frame = (Frame){1, 0, 0, 1};
     gm->travel = 0;
     gm->timewarp = 1.0f;
     gm->channel = 0;
+    trg_keep(gm);
     memset(&gm->logic, 0, sizeof gm->logic);
+    gm->chain.n = 0;
     gm->free = 0;
     // kA4: 0 = normal, 1 = slow, 2 = fast, 3 = faster, 4 = fastest
     static const int map[5] = {1, 0, 2, 3, 4};
     int si = gm->start_speed;
     p->speed = k_speeds[map[(si >= 0 && si < 5) ? si : 0]];
-    p->mode = gm->start_mode == 1 ? M_SHIP : M_CUBE;
-    p->last_ground_y = 15;
+    p->mode = gm->start_mode >= M_CUBE && gm->start_mode <= M_SWING ? gm->start_mode : M_CUBE;   // header order
+    p->mini = gm->start_mini;
+    p->last_ground_y = p->y;
     p->hold = p->queued = gm->input;
-    gm->dual = 0;
-    gm->mirror = 0;
+    gm->dual = gm->start_dual;
+    if (gm->dual) {
+        gm->p2 = *p;
+        gm->p2.grav = -p->grav;
+    }
+    gm->mirror = gm->start_mirror;
     gm->mir_x = 190;
     gm->ctr = 240;
     gm->ground_y = 0;
-    gm->has_ceil = p->mode != M_CUBE;
+    const int walls = gm->dual || (p->mode != M_CUBE && p->mode != M_ROBOT);   // a floor and a ceiling
+    gm->has_ceil = walls;
     gm->ceil_y = 301;
     for (int i = 0; i < gm->n; i++) {
         Obj *o = &gm->obj[i];
@@ -959,13 +1155,26 @@ void game_reset(Game *gm)
         o->off = 0;
         o->x = o->x0; o->y = o->y0;
         if (o->spin == 0) o->rot = o->rot0;
+        if (o->kx != 1 || o->ky != 1) {
+            gm_obj_scale(o, 1.0f / o->kx, 1.0f / o->ky);
+            o->kx = o->ky = 1;
+        }
     }
+    memset(&gm->view, 0, sizeof gm->view);
+    gm->view.zoom.from = gm->view.zoom.to = 1;
+    gm->view.bg_id = gm->bg_id0;
+    gm->view.ground_id = gm->ground_id0;
+    visual_reset(gm);
+    memset(gm->grad, 0, sizeof gm->grad);
     for (int i = 0; i < GD_GROUPS; i++) gm->galpha[i] = 1.0f;
     gm->nmv = gm->nsp = 0;
+    motion_reset(gm);
+    trg_attempt(gm);
     gm->time = 0;
     gm->finished = 0;
     gm->cam_x = -190;
-    gm->cam_bottom = p->mode == M_CUBE ? -90.0f : gm->ctr - 250.0f;
+    if (walls) set_ctr(gm, p->mode == M_CUBE || p->mode == M_ROBOT ? M_SHIP : p->mode, p->y);
+    gm->cam_bottom = walls ? gm->ctr - 250.0f : fmaxf(-90.0f, p->y - 105.0f);
     gm->cam_target = gm->cam_bottom + 90.0f;
     if (gm->ch0_valid) memcpy(gm->ch, gm->ch0, sizeof gm->ch);
     gm->acc = 0;
@@ -988,6 +1197,7 @@ static void die_why(Game *gm, const char *why, const Obj *o)
 }
 
 #define die(gm) die_why(gm, "?", NULL)
+#define COIN_FLY_TIME 0.75f   // seconds a picked up coin stays visible
 
 // ---------------------------------------------------------------- particles (visual only)
 
@@ -1044,11 +1254,27 @@ static void portal_rgb(int sub, float *r, float *g, float *b)
     switch (sub) {
     case P_GRAV_DOWN: case P_MIRROR_OFF: *r = 60; *g = 170; *b = 255; break;
     case P_GRAV_UP: case P_MIRROR_ON: *r = 255; *g = 230; *b = 60; break;
-    case P_CUBE: case P_SIZE_NORMAL: *r = 80; *g = 255; *b = 100; break;
+    case P_GRAV_TOGGLE: case P_CUBE: case P_SIZE_NORMAL: *r = 80; *g = 255; *b = 100; break;
     case P_SHIP: case P_SIZE_MINI: *r = 255; *g = 90; *b = 200; break;
     case P_BALL: case P_UFO: case P_DUAL_ON: *r = 255; *g = 150; *b = 30; break;
     case P_WAVE: case P_DUAL_OFF: *r = 40; *g = 200; *b = 255; break;
     default: *r = 255; *g = 255; *b = 255; break;
+    }
+}
+
+float gm_random(void) { return frand(); }
+
+// A gradient is shown until another trigger with the same id replaces it or switches it off.
+void gm_add_gradient_state(Game *gm, int obj)
+{
+    if (trg_prop(&gm->obj[obj], 508, 0) != 0) {   // all of them off
+        memset(gm->grad, 0, sizeof gm->grad);
+        return;
+    }
+    for (int i = 0; i < gm->ngradients; i++) {
+        if (gm->gradients[i].obj != obj) continue;
+        gm->grad[gm->gradients[i].id] = gm->gradients[i].off ? 0 : (short)(i + 1);
+        break;
     }
 }
 
@@ -1065,7 +1291,7 @@ static void death_fx(Game *gm)
 // Idle emitters of the player icon (ship flame, ground dust, wave sparks), run once per step.
 static void player_fx(Game *gm, const Player *p, int was_ground)
 {
-    if (gm->sim || p->dead) return;
+    if (gm->sim || p->dead || gm->view.hidden) return;
     const float k = p->mini ? 0.6f : 1.0f, gsign = (float)p->grav;
     if (p->on_ground && !was_ground && (p->mode == M_CUBE || p->mode == M_ROBOT || p->mode == M_BALL || p->mode == M_SPIDER)) {
         float fy = p->y - 14.0f * k * gsign;   // landing puff
@@ -1073,12 +1299,24 @@ static void player_fx(Game *gm, const Player *p, int was_ground)
             emit_square(gm, p->x - 6 + frand() * 12, fy, (frand() - 0.7f) * 90.0f, gsign * (15.0f + frand() * 40.0f), 0.4f,
                         (2.5f + frand() * 2.5f) * k, gm->c1[0], gm->c1[1], gm->c1[2]);
     }
+    // squares left behind while dashing, in the second colour
+    if (p->dashing && (int)(p->dash_age * 120.0f) != (int)((p->dash_age - STEP) * 120.0f)) {
+        const float d = p->dash_angle * 3.14159265f / 180.0f, dx = cosf(d), dy = -sinf(d);
+        const float side = (frand() * 2.0f - 1.0f) * 12.0f * k, speed = 13.0f + frand() * 24.0f;
+        const float size = (4.0f + frand() * 8.0f) * k * 0.7f, life = 0.2f + frand() * 0.4f;
+        const float *col = p == &gm->p ? gm->c2 : gm->c1;
+        const int n = gm->npt;
+        emit(gm, p->x - dy * side, p->y + dx * side, -dx * speed, -dy * speed, life, size, -size / life,
+             col[0], col[1], col[2], 0.6f);
+        if (gm->npt > n) gm->pt[n].square = 1;
+    }
     gm->emit_t += STEP;
     if (gm->emit_t < 0.012f) return;
     gm->emit_t = 0;
     float a = p->rot * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
+    if (p->dashing) return;
     if (p->mode == M_SHIP || p->mode == M_UFO) {
-        float dx = (p->mode == M_SHIP ? -17.0f : -8.0f) * k, dy = (p->mode == M_SHIP ? -3.0f : -11.0f) * k * gsign;
+        float dx = (p->mode == M_SHIP ? -17.0f : -8.0f) * k, dy = (p->mode == M_SHIP ? -8.0f : -11.0f) * k * gsign;
         float wx = dx * c + dy * s, wy = -dx * s + dy * c;
         if (p->mode == M_SHIP && (p->hold || 1))
             emit(gm, p->x + wx, p->y + wy, -70.0f - frand() * 50.0f, (frand() - 0.5f) * 50.0f, 0.28f, 11.0f * k, -30.0f,
@@ -1095,6 +1333,8 @@ static void player_fx(Game *gm, const Player *p, int was_ground)
 
 static void particles_step(Game *gm, float dt)
 {
+    for (int k = 0; k < GD_MAX_COINS; k++)
+        if (gm->coin_fly[k].age > 0 && (gm->coin_fly[k].age += dt) > COIN_FLY_TIME) gm->coin_fly[k].age = 0;
     for (int i = 0; i < gm->npt;) {
         Particle *p = &gm->pt[i];
         p->life -= dt;
@@ -1107,56 +1347,38 @@ static void particles_step(Game *gm, float dt)
     }
 }
 
+// What pressing or releasing the button means for event triggers, by the form of the icon.
+static void input_events(Game *gm, int down)
+{
+    const Player *p = &gm->p;
+    trg_event(gm, down ? 69 : 70);
+    if (down) {
+        const int e = p->mode == M_UFO ? 15 : p->mode == M_BALL ? 19 : p->mode == M_SWING ? 20 : p->mode == M_SHIP ? 16
+                    : p->mode == M_WAVE ? 21 : p->mode == M_ROBOT ? 13 : p->mode == M_SPIDER ? 18 : p->on_ground ? 12 : 0;
+        trg_event(gm, e);
+    } else {
+        trg_event(gm, p->mode == M_SHIP ? 17 : p->mode == M_WAVE ? 22 : p->mode == M_ROBOT ? 14 : 0);
+    }
+}
+
 void game_set_hold(Game *gm, int down)
 {
     if (down && !gm->input && !gm->sim && !gm->p.dead && !gm->finished) gm->jumps++;
     down = down != 0;
+    const int changed = down != gm->input;
     if (down && !gm->input) {
-        gm->p.hold = gm->p2.hold = 1;
-        gm->p.queued = gm->p2.queued = 1;
-        gm->p.just_held = gm->p2.just_held = 1;
+        gm->p.hold = gm->p.queued = gm->p.just_held = gm->p.fresh = 1;
+        gm->p2.hold = gm->p2.queued = gm->p2.just_held = gm->p2.fresh = 1;
     } else if (!down) {
         gm->p.hold = gm->p2.hold = 0;
         gm->p.queued = gm->p2.queued = 0;
         gm->p.just_held = gm->p2.just_held = 0;
     }
     gm->input = down;
+    if (changed && gm->logic.nlisten && !gm->p.dead && !gm->finished) input_events(gm, down);
 }
 
-static void start_fade(Game *gm, const Obj *t)
-{
-    if (t->ttarget < 0 || t->ttarget >= CH_COUNT || t->ttarget == CH_BLACK || t->ttarget == CH_WHITE) return;
-    Channel *c = &gm->ch[t->ttarget];
-    const Channel *shown = &gm->ch[t->tplayer == 2 ? CH_P2 : CH_P1];
-    if (c->player) {   // leaving a player colour: start from what was shown
-        const Channel *now = &gm->ch[c->player == 2 ? CH_P2 : CH_P1];
-        c->r = now->r; c->g = now->g; c->b = now->b;
-    }
-    c->player = 0;
-    c->next_player = t->tplayer;
-    c->lbg = 0;
-    c->hsv_on = 0;
-    c->copy = t->tcopy > 0 && t->tcopy < CH_COUNT && t->tcopy != t->ttarget ? t->tcopy : 0;
-    c->copy_op = 0;
-    if (c->copy && t->copy_hsv > 0 && t->copy_hsv <= gm->nhsv) {   // the copied colour is shifted
-        const float *v = gm->hsv[t->copy_hsv - 1];
-        c->hsv_on = 1;
-        c->hs = v[0]; c->ss = v[1]; c->vs = v[2]; c->sadd = (int)v[3]; c->vadd = (int)v[4];
-    }
-    c->fr = c->r; c->fg = c->g; c->fb = c->b; c->fa = c->a;
-    c->tr = t->tr; c->tg = t->tg; c->tb = t->tb;
-    if (t->tplayer) { c->tr = shown->r; c->tg = shown->g; c->tb = shown->b; }
-    c->ta = t->topacity;   // key 35, 1 when absent
-    c->additive = t->tblend;
-    c->t = 0;
-    c->dur = t->tdur;
-    c->fading = 1;
-    if (c->dur <= 0.001f) {
-        c->r = c->tr; c->g = c->tg; c->b = c->tb; c->a = c->ta;
-        c->fading = 0;
-        c->player = c->next_player;
-    }
-}
+int gm_teleport(Game *gm, Player *p, int group);
 
 static int first_index(const Game *gm, float x)
 {
@@ -1166,404 +1388,6 @@ static int first_index(const Game *gm, float x)
         if (gm->obj[gm->by_x[mid]].x < x) lo = mid + 1; else hi = mid;
     }
     return lo;
-}
-
-// ---------------------------------------------------------------- triggers: move, toggle, alpha, spawn
-
-static float ease_apply(int type, float t, float rate)
-{
-    if (t <= 0) return 0;
-    if (t >= 1) return 1;
-    if (rate < 0.1f) rate = 2.0f;
-    switch (type) {
-    case 0: return t;
-    case 1: // ease in out
-        return t < 0.5f ? 0.5f * powf(2.0f * t, rate) : 1.0f - 0.5f * powf(2.0f * (1.0f - t), rate);
-    case 2: return powf(t, rate);                       // ease in
-    case 3: return 1.0f - powf(1.0f - t, rate);         // ease out
-    case 10: return t == 0 ? 0 : powf(2.0f, 10.0f * (t - 1.0f));      // exponential in
-    case 11: return t == 1 ? 1 : 1.0f - powf(2.0f, -10.0f * t);      // exponential out
-    case 12: return t < 0.5f ? 0.5f * powf(2.0f, 20.0f * t - 10.0f) : 1.0f - 0.5f * powf(2.0f, -20.0f * t + 10.0f);
-    case 13: return 1.0f - cosf(t * 1.5707963f);                      // sine in
-    case 14: return sinf(t * 1.5707963f);                             // sine out
-    case 15: return -0.5f * (cosf(3.1415926f * t) - 1.0f);            // sine in out
-    case 16: return t * t * (2.70158f * t - 1.70158f);                // back in
-    case 17: { float u = t - 1.0f; return 1.0f + u * u * (2.70158f * u + 1.70158f); }
-    default: return t * t * (3.0f - 2.0f * t);                        // smoothstep for the rest
-    }
-}
-
-// Call before the look-ahead changes an object, so that game_rewind can put it back.
-static void touch(Game *gm, const Obj *o)
-{
-    if (!gm->sim) return;
-    if (gm->nundo == gm->capundo) {
-        const int cap = gm->capundo ? gm->capundo * 2 : 4096;
-        UndoEntry *u = realloc(gm->undo, (size_t)cap * sizeof *u);
-        if (!u) return;
-        gm->undo = u;
-        gm->capundo = cap;
-    }
-    gm->undo[gm->nundo++] = (UndoEntry){(int)(o - gm->obj), o->x, o->y, o->rot, (unsigned char)o->used,
-                                        (unsigned char)o->used2, (unsigned char)o->tdone, o->off};
-}
-
-static void group_apply_move(Game *gm, int group, float dx, float dy)
-{
-    if (group <= 0 || group >= GD_GROUPS) return;
-    for (int k = gm->grp_start[group]; k < gm->grp_start[group + 1]; k++) {
-        Obj *o = &gm->obj[gm->grp_items[k]];
-        if (gm->sim && (o->type == OT_DECO || o->type == OT_HIDDEN)) continue;
-        touch(gm, o);
-        o->x += dx;
-        o->y += dy;
-    }
-}
-
-// Rotates the objects of a group (clockwise degrees) around the first object of the centre group.
-static void group_apply_rotate(Game *gm, int group, int center, float deg)
-{
-    if (group <= 0 || group >= GD_GROUPS) return;
-    if (center <= 0 || center >= GD_GROUPS || gm->grp_start[center] >= gm->grp_start[center + 1]) center = group;
-    if (gm->grp_start[center] >= gm->grp_start[center + 1]) return;
-    const Obj *pivot = &gm->obj[gm->grp_items[gm->grp_start[center]]];
-    const float cx = pivot->x, cy = pivot->y;
-    const float r = deg * 3.14159265f / 180.0f, c = cosf(r), s = sinf(r);
-    for (int k = gm->grp_start[group]; k < gm->grp_start[group + 1]; k++) {
-        Obj *o = &gm->obj[gm->grp_items[k]];
-        if (gm->sim && (o->type == OT_DECO || o->type == OT_HIDDEN)) continue;
-        touch(gm, o);
-        const float dx = o->x - cx, dy = o->y - cy;
-        o->x = cx + dx * c + dy * s;
-        o->y = cy - dx * s + dy * c;
-        o->rot += deg;
-    }
-}
-
-static void fire_trigger(Game *gm, Obj *t, int depth);
-static void activate_group(Game *gm, int group, int on, int depth);
-static int teleport_to_group(Game *gm, Player *p, int group);
-
-// Switches the objects of a group on (their triggers fire) or off.
-static void activate_group(Game *gm, int group, int on, int depth)
-{
-    if (group <= 0 || group >= GD_GROUPS) return;
-    for (int k = gm->grp_start[group]; k < gm->grp_start[group + 1]; k++) {
-        Obj *o = &gm->obj[gm->grp_items[k]];
-        if (!gm->sim || (o->type != OT_DECO && o->type != OT_HIDDEN)) { touch(gm, o); o->off = on ? 0 : 1; }
-        if (on && o->type == OT_TRIGGER && o->spawn_only && depth < 4) fire_trigger(gm, o, depth + 1);
-    }
-}
-
-static Frame frame_from(int move, int ground, Frame cur)
-{
-    static const signed char dir[5][2] = {{0, 0}, {0, 1}, {0, -1}, {-1, 0}, {1, 0}};
-    Frame f = cur;
-    if (move >= 1 && move <= 4) { f.fx = dir[move][0]; f.fy = dir[move][1]; }
-    if (ground >= 1 && ground <= 4) { f.ux = (signed char)-dir[ground][0]; f.uy = (signed char)-dir[ground][1]; }
-    if (f.fx * f.ux + f.fy * f.uy != 0) { f.ux = (signed char)-f.fy; f.uy = f.fx; }   // keep them at a right angle
-    return f;
-}
-
-static int *item_slot(Game *gm, int item)
-{
-    Logic *l = &gm->logic;
-    for (int i = 0; i < l->nitem; i++)
-        if (l->item[i] == item) return &l->value[i];
-    if (l->nitem >= GD_MAX_ITEMS) return NULL;
-    l->item[l->nitem] = (short)item;
-    l->value[l->nitem] = 0;
-    return &l->value[l->nitem++];
-}
-
-static unsigned logic_random(Game *gm)   // part of the state, so the look-ahead sees the same dice
-{
-    unsigned x = gm->logic.rng ? gm->logic.rng : 0x9e3779b9u;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    return gm->logic.rng = x;
-}
-
-static void watch_trigger(Game *gm, Obj *t)
-{
-    const int oi = (int)(t - gm->obj);
-    Logic *l = &gm->logic;
-    for (int i = 0; i < l->nwatch; i++)
-        if (l->watch[i].obj == oi) return;
-    if (l->nwatch >= GD_MAX_WATCH) return;
-    int state = 0;
-    if (t->tid == 1595) state = gm->input;
-    else if (t->tid == 1611) { const int *v = item_slot(gm, t->ttarget); state = v && *v == t->tcopy; }
-    l->watch[l->nwatch].obj = oi;
-    l->watch[l->nwatch++].state = state;
-}
-
-static int blocks_touch(const Game *gm, const Obj *a, int id_b)
-{
-    const float ahw = 15.0f * fabsf(a->sx), ahh = 15.0f * fabsf(a->sy);
-    for (int i = 0; i < gm->ncblocks; i++) {
-        const Obj *b = &gm->obj[gm->cblocks[i]];
-        if (b == a || b->off || (int)b->value != id_b) continue;
-        if (fabsf(a->x - b->x) < ahw + 15.0f * fabsf(b->sx) && fabsf(a->y - b->y) < ahh + 15.0f * fabsf(b->sy)) return 1;
-    }
-    return 0;
-}
-
-static int collision_now(const Game *gm, const Obj *t)
-{
-    if (t->tplayer) {   // icon against a block id (either field may hold it)
-        const int id = t->tcopy > 0 ? t->tcopy : t->ttarget;
-        const float h = gm->p.mini ? 9.0f : 15.0f;
-        for (int i = 0; i < gm->ncblocks; i++) {
-            const Obj *b = &gm->obj[gm->cblocks[i]];
-            if (!b->off && (int)b->value == id && fabsf(gm->p.x - b->x) < h + 15.0f * fabsf(b->sx) &&
-                fabsf(gm->p.y - b->y) < h + 15.0f * fabsf(b->sy)) return 1;
-        }
-        return 0;
-    }
-    for (int i = 0; i < gm->ncblocks; i++) {
-        const Obj *a = &gm->obj[gm->cblocks[i]];
-        if (!a->off && (int)a->value == t->ttarget && blocks_touch(gm, a, t->tcopy)) return 1;
-    }
-    return 0;
-}
-
-static void logic_step(Game *gm)
-{
-    Logic *l = &gm->logic;
-    for (int i = 0; i < l->nwatch; i++) {
-        const Obj *t = &gm->obj[l->watch[i].obj];
-        if (t->off) continue;
-        int now = 0;
-        if (t->tid == 1611) {
-            const int *v = item_slot(gm, t->ttarget);
-            now = v && *v == t->tcopy;
-            if (now && !l->watch[i].state) activate_group(gm, t->tgroup, t->tact, 0);
-        } else if (t->tid == 1815) {
-            now = collision_now(gm, t);
-            if (t->tlockx ? !now && l->watch[i].state : now && !l->watch[i].state) activate_group(gm, t->tgroup, t->tact, 0);
-        } else {   // 1595 touch
-            now = gm->input;
-            const int pressed = now && !l->watch[i].state, released = !now && l->watch[i].state;
-            if (pressed || (released && t->tlockx)) {
-                int on = t->tcenter == 1 ? 1 : t->tcenter == 2 ? 0 : -1;
-                if (on < 0) {   // toggle: look at the first object of the group
-                    const int g = t->tgroup;
-                    on = g > 0 && g < GD_GROUPS && gm->grp_start[g] < gm->grp_start[g + 1] &&
-                         gm->obj[gm->grp_items[gm->grp_start[g]]].off;
-                }
-                activate_group(gm, t->tgroup, on, 0);
-            }
-        }
-        l->watch[i].state = now;
-    }
-}
-
-static void fire_trigger(Game *gm, Obj *t, int depth)
-{
-    switch (t->tid) {
-    case 3022: { // teleport trigger: move the icon to a group, with the options of the teleport portal
-        Player *p = &gm->p;
-        if (!teleport_to_group(gm, p, t->tgroup)) break;
-        if (t->tforce != 0) p->yv = t->tforce;
-        if (t->tgrav) p->grav = (t->tgrav == 3 ? p->grav > 0 : t->tgrav == 2) ? -1 : 1;
-        p->rising = p->yv * p->grav > 0;
-        break;
-    }
-    case 1611: case 1815: case 1595: // keep watching from now on
-        watch_trigger(gm, t);
-        break;
-    case 1817: { // pickup: change an item counter
-        int *v = item_slot(gm, t->ttarget);
-        if (v) *v += t->tcopy;
-        break;
-    }
-    case 1811: { // instant count: compare once
-        const int *v = item_slot(gm, t->ttarget);
-        if (v && (t->tcenter == 1 ? *v > t->tcopy : t->tcenter == 2 ? *v < t->tcopy : *v == t->tcopy) && depth < 4)
-            activate_group(gm, t->tgroup, t->tact, depth + 1);
-        break;
-    }
-    case 1912: // random: one of two groups
-        if (depth < 4) activate_group(gm, (float)(logic_random(gm) % 10000) < t->value * 100.0f ? t->tgroup : t->tcenter, 1, depth + 1);
-        break;
-    case 2068: case 3607: { // weighted random / sequence over a list of groups
-        const int oi = (int)(t - gm->obj);
-        for (int i = 0; i < gm->nlists; i++) {
-            if (gm->lists[i].obj != oi) continue;
-            const short *v = gm->lists[i].list;
-            const int n = gm->lists[i].n & ~1;
-            int total = 0, pick = -1;
-            for (int k = 1; k < n; k += 2) total += v[k] > 0 ? v[k] : 0;
-            if (total <= 0) break;
-            int at;
-            if (t->tid == 2068) at = (int)(logic_random(gm) % (unsigned)total);
-            else { touch(gm, t); at = t->used % total; t->used = (at + 1) % total; }
-            for (int k = 0; k < n && pick < 0; k += 2) {
-                at -= v[k + 1] > 0 ? v[k + 1] : 0;
-                if (at < 0) pick = v[k];
-            }
-            if (depth < 4) activate_group(gm, pick, 1, depth + 1);
-            break;
-        }
-        break;
-    }
-    case 2900: // rotate gameplay
-        gm->next_frame = frame_from(t->rmove, t->rground, gm->next_frame);
-        gm->channel = t->to_channel;
-        break;
-    case 1917: // reverse: run the other way
-        gm->next_frame.fx = (signed char)-gm->next_frame.fx;
-        gm->next_frame.fy = (signed char)-gm->next_frame.fy;
-        break;
-    case 1935: // time warp
-        if (!gm->sim) gm->timewarp = fminf(fmaxf(t->value, 0.1f), 2.0f);
-        break;
-    case 2066: // gravity factor
-        if (t->value > 0.01f) gm->p.gscale = gm->p2.gscale = t->value;
-        break;
-    case 1914: // static camera: the camera is not simulated, but the flying borders that follow it go away
-        if (gm->has_jumps && !t->tact) gm->free = 1;
-        break;
-    case 3600: // end of the level
-        gm->finished = 1;
-        break;
-    case 1347: // follow: a group moves along with the first object of another group
-        if (gm->nmv < GD_MAX_MOVES && t->tcenter > 0 && t->tcenter < GD_GROUPS &&
-            gm->grp_start[t->tcenter] < gm->grp_start[t->tcenter + 1]) {
-            Move *m = &gm->mv[gm->nmv++];
-            memset(m, 0, sizeof *m);
-            const Obj *lead = &gm->obj[gm->grp_items[gm->grp_start[t->tcenter]]];
-            m->group = t->tgroup; m->follow = t->tcenter; m->dur = t->tdur > 0 ? t->tdur : 0.001f;
-            m->dx = t->fxmod; m->dy = t->fymod; m->lx = lead->x; m->ly = lead->y;
-        }
-        break;
-    case 901: // move
-        if (t->tdur <= 0.001f) { group_apply_move(gm, t->tgroup, t->tdx, t->tdy); break; }
-        if (gm->nmv < GD_MAX_MOVES) {
-            Move *m = &gm->mv[gm->nmv++];
-            memset(m, 0, sizeof *m);
-            m->group = t->tgroup; m->dx = t->tdx; m->dy = t->tdy; m->dur = t->tdur;
-            m->easing = t->teasing; m->rate = t->trate;
-            m->lockx = t->tlockx; m->locky = t->tlocky;
-            m->lx = gm->p.x; m->ly = gm->p.y;
-            if (m->lockx) m->dx = 0;
-            if (m->locky) m->dy = 0;
-        }
-        break;
-    case 1346: // rotate a group around the object of the centre group
-        if (t->tdur <= 0.001f) { group_apply_rotate(gm, t->tgroup, t->tcenter, t->trot); break; }
-        if (gm->nmv < GD_MAX_MOVES) {
-            Move *m = &gm->mv[gm->nmv++];
-            memset(m, 0, sizeof *m);
-            m->group = t->tgroup; m->center = t->tcenter > 0 ? t->tcenter : t->tgroup; m->rot = t->trot;
-            m->dur = t->tdur; m->easing = t->teasing; m->rate = t->trate;
-        }
-        break;
-    case 1616: // stop: cancel the running commands of a group
-        for (int i = 0; i < gm->nmv;)
-            if (gm->mv[i].group == t->tgroup) gm->mv[i] = gm->mv[--gm->nmv]; else i++;
-        break;
-    case 1585:   // animate: starts the effects of a group that wait for it
-        if (t->tgroup > 0 && t->tgroup < GD_GROUPS)
-            for (int i = gm->grp_start[t->tgroup]; i < gm->grp_start[t->tgroup + 1]; i++) {
-                Obj *o = &gm->obj[gm->grp_items[i]];
-                if (!o->effect || !o->fx_trigger) continue;
-                o->fx_at = gm->anim_t;
-                o->fx_run = gm->run;
-            }
-        break;
-    case 1049: // toggle
-        if (t->tgroup > 0 && t->tgroup < GD_GROUPS)
-            for (int k = gm->grp_start[t->tgroup]; k < gm->grp_start[t->tgroup + 1]; k++)
-            {
-                Obj *o = &gm->obj[gm->grp_items[k]];
-                if (!gm->sim || (o->type != OT_DECO && o->type != OT_HIDDEN)) { touch(gm, o); o->off = t->tact ? 0 : 1; }
-            }
-        break;
-    case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 55: case 56: case 57: case 58: case 59: case 1915:
-        if (!gm->sim) gm->enter_fx = t->tid;   // visual only
-        break;
-    case 32: case 33:
-        if (!gm->sim) gm->ghost_on = t->tid == 32;
-        break;
-    case 1520:
-        if (!gm->sim) {
-            gm->shake_left = t->tdur;
-            gm->shake_amp = t->value;
-            gm->shake_every = t->trate;
-        }
-        break;
-    case 1007: // alpha (visual only), fading over the trigger's duration
-        if (gm->sim || t->tgroup <= 0 || t->tgroup >= GD_GROUPS) break;
-        for (int i = 0; i < gm->naf;)
-            if (gm->af[i].group == t->tgroup) gm->af[i] = gm->af[--gm->naf]; else i++;
-        if (t->tdur > 0.001f && gm->naf < GD_MAX_PULSES)
-            gm->af[gm->naf++] = (AlphaFade){t->tgroup, gm->galpha[t->tgroup], t->topacity, t->tdur, 0};
-        else
-            gm->galpha[t->tgroup] = t->topacity;
-        break;
-    case 1006: // pulse (visual only)
-        if (gm->sim || gm->npu >= GD_MAX_PULSES) break;
-        gm->pu[gm->npu++] = (Pulse){t->ttarget, t->pgroup, t->pcopy ? (t->tcopy > 0 ? t->tcopy : -1) : 0, t->ponly,
-                                    t->tr, t->tg, t->tb, t->phue, t->pin, t->phold, t->pout, 0};
-        break;
-    case 1268: // spawn: fire the triggers of a group, optionally after a delay
-        if (depth < 4 && t->tgroup > 0 && t->tgroup < GD_GROUPS)
-            for (int k = gm->grp_start[t->tgroup]; k < gm->grp_start[t->tgroup + 1]; k++) {
-                int oi = gm->grp_items[k];
-                if (gm->obj[oi].type != OT_TRIGGER) continue;
-                if (t->tdelay > 0.001f) {
-                    if (gm->nsp < GD_MAX_SPAWNS) { gm->sp[gm->nsp].obj = oi; gm->sp[gm->nsp].left = t->tdelay; gm->nsp++; }
-                } else {
-                    fire_trigger(gm, &gm->obj[oi], depth + 1);
-                }
-            }
-        break;
-    default: // colour triggers
-        if (!gm->sim) {
-            start_fade(gm, t);
-            if (t->tground) {
-                Obj g = *t;
-                g.ttarget = CH_GROUND;
-                start_fade(gm, &g);
-            }
-        }
-        break;
-    }
-}
-
-// Advances running move commands and delayed spawns by one simulation step.
-static void triggers_step(Game *gm)
-{
-    for (int i = 0; i < gm->nmv;) {
-        Move *m = &gm->mv[i];
-        m->t += STEP;
-        float f = ease_apply(m->easing, m->t >= m->dur ? 1.0f : m->t / m->dur, m->rate);
-        float d = f - m->done;
-        if (m->follow) {
-            const Obj *lead = &gm->obj[gm->grp_items[gm->grp_start[m->follow]]];
-            const float mx = (lead->x - m->lx) * m->dx, my = (lead->y - m->ly) * m->dy;
-            m->lx = lead->x; m->ly = lead->y;
-            if (mx != 0 || my != 0) group_apply_move(gm, m->group, mx, my);
-        } else if (m->center) {
-            if (d != 0) group_apply_rotate(gm, m->group, m->center, m->rot * d);
-        } else {
-            float mx = m->dx * d, my = m->dy * d;
-            if (m->lockx) { mx += gm->p.x - m->lx; m->lx = gm->p.x; }
-            if (m->locky) { my += gm->p.y - m->ly; m->ly = gm->p.y; }
-            if (mx != 0 || my != 0) group_apply_move(gm, m->group, mx, my);
-        }
-        m->done = f;
-        if (m->t >= m->dur) gm->mv[i] = gm->mv[--gm->nmv]; else i++;
-    }
-    for (int i = 0; i < gm->nsp;) {
-        gm->sp[i].left -= STEP;
-        if (gm->sp[i].left <= 0) {
-            int oi = gm->sp[i].obj;
-            gm->sp[i] = gm->sp[--gm->nsp];
-            fire_trigger(gm, &gm->obj[oi], 1);
-        } else i++;
-    }
 }
 
 // ---------------------------------------------------------------- physics
@@ -1576,6 +1400,7 @@ static void triggers_step(Game *gm)
 // ground line at y = 0 (OpenGD's y minus 90); the player position is the centre of the icon.
 
 #define FRAMES_PER_STEP 0.25
+#define STREAK_TIME 0.3f      // seconds a point of the streak stays visible
 #define GRAVITY 0.958199
 #define JUMP_HEIGHT 11.180032
 
@@ -1602,6 +1427,9 @@ static void region(const Game *gm, const Player *p, float *fl, float *ce)
     if (p->mode == M_BALL || p->mode == M_SPIDER) { f = gm->cam_target - 35.0f; c = gm->ctr + 16.0f; }
     else { f = gm->cam_target - 65.0f; c = gm->ctr + 46.0f; }
     if (p->mini) { f -= 6.0f; c += 6.0f; }
+    // these borders are meant for an icon of size 30; spider and wave keep another distance from them
+    const float adj = (p->mini ? 9.0f : 15.0f) - gd_floor_half(p);
+    f -= adj; c += adj;
     *fl = f; *ce = c;
 }
 
@@ -1619,11 +1447,28 @@ static void stop_rotation(Player *p)
     p->snap = 1;
 }
 
+// Looks only: from now on the icon draws a streak behind it (until it lands).
+static void start_streak(Player *p)
+{
+    if (p->mode == M_WAVE || p->streak) return;
+    p->streak = 1;
+    p->trail_n = 0;
+    p->streak_idle = 0;
+}
+
+// forms that walk keep the streak until they touch the ground again, the others only while dashing
+static int walks(const Player *p)
+{
+    return p->mode == M_CUBE || p->mode == M_ROBOT || p->mode == M_BALL || p->mode == M_SPIDER;
+}
+
 static void flip_gravity(Player *p, int flipped)
 {
     if (is_flipped(p) != flipped) {
+        if (walks(p)) start_streak(p);
         p->grav = flipped ? -1 : 1;
         p->yv /= 2.0;
+        p->flip_grace = 0.1f;
     }
 }
 
@@ -1633,6 +1478,7 @@ static void hit_ground(Player *p)
     p->queued = 0;
     p->on_ground = 1;
     p->last_ground_y = p->y;
+    if (!p->dashing) p->streak = 0;
     if (p->rot_left > 0) stop_rotation(p);
 }
 
@@ -1642,6 +1488,7 @@ static void set_mode(Player *p, int mode)
     p->rot_left = 0;
     p->snap = 0;
     p->trail_n = 0;
+    p->streak = 0;
     if (mode == M_SHIP) {
         p->rot = 0;
         p->yv /= 2.0;
@@ -1663,6 +1510,7 @@ static void propel(Player *p, double force)
 {
     p->rising = 1;
     p->on_ground = 0;
+    if (walks(p)) start_streak(p);
     p->yv = flip_mod(p) * 16.0 * force * (p->mini ? 0.8 : 1.0);
     if (p->mode == M_BALL || p->mode == M_SPIDER) p->yv *= 0.6;
     if (p->mode == M_CUBE || p->mode == M_ROBOT) run_rotate_action(p);
@@ -1689,8 +1537,14 @@ static void ring_jump(Player *p, const Obj *o, int *used)
         p->dash_slope = -tanf(a * 3.14159265f / 180.0f);
         p->yv = 0;
         p->touch_ring = 0;
+        start_streak(p);
+        stop_rotation(p);
+        p->dash_age = STEP;
+        p->boom_age = -1;
+        p->boom_flip = o->sub == K_DASH_FLIP;
         return;
     }
+    if (walks(p)) start_streak(p);
     if (o->sub == K_BLACK) {   // slams the icon in the direction of gravity
         p->yv = -flip_mod(p) * 15.0 * (p->mini ? 0.8 : 1.0);
         p->rising = 0;
@@ -1828,97 +1682,99 @@ static int rect_hit(float ax0, float ax1, float ay0, float ay1, float bx0, float
     return !(ax1 < bx0 || bx1 < ax0 || ay1 < by0 || by1 < ay0);
 }
 
-static int circle_hit(float rx0, float rx1, float ry0, float ry1, float cx, float cy, float r)
+// A block landed on or bumped into. Moving away from it fast, the icon does not count as grounded.
+static void land(Player *p)
 {
-    float nx = cx < rx0 ? rx0 : cx > rx1 ? rx1 : cx;
-    float ny = cy < ry0 ? ry0 : cy > ry1 ? ry1 : cy;
-    float dx = cx - nx, dy = cy - ny;
-    return dx * dx + dy * dy <= r * r;
+    const int away = flip_mod(p) * p->yv > 5.0;
+    hit_ground(p);
+    if (away) p->on_ground = 0;
 }
 
-// PlayerObject::collidedWithObject. OpenGD keeps object rectangles shifted by +15 in both axes
-// (so that "set position to MaxY" lands the icon centre on top of the block); MaxY/MinY
-// reproduce that. For the mini icon the "landing window" is kept equal to the big icon's
-// (it may sink 5 units into a block) by moving the reference points by the 6 unit rest offset.
-static void collided(Game *gm, Player *p, const Obj *o, Obj *orig)
+// The icon's outer box touches a block (collidedWithObject, as gd-levelgen worked it out for
+// 2.2081). It is put on top of the block if its "feet" (its lower edge plus a tolerance) are above
+// it now or were before the last movement; flying forms and the ball also bump into blocks above
+// them this way. Otherwise only the inner box decides: overlapping the block with it is deadly.
+static void collided(Game *gm, Player *p, const Obj *o, Obj *orig, int ceil_before)
 {
-    float bx0, bx1, by0, by1;
-    obj_rect(o, &bx0, &bx1, &by0, &by1);
-    const float cy = p->y;
-    const float oh = p->mini ? 9.0f : 15.0f;
-    const float fm = (float)flip_mod(p);
-    const int ship = p->mode == M_SHIP || p->mode == M_UFO || p->mode == M_SWING;
-    const float rest = p->mini ? 6.0f : 0.0f;
-    const float tol = p->mode == M_SHIP ? 9.0f : 5.0f;
-    float topP = cy + (tol + rest) * fm;
-    float botP = cy - (tol + rest) * fm;
-    const float MaxY = by1 + 15.0f, MinY = by0 + 15.0f;
-    const float MaxYP = cy + 15.0f + oh, MinYP = cy + 15.0f - oh;
-    const float mid = (MinY + MaxY) * 0.5f;
-    float t = topP, b = botP;
-
-    const float iy0 = cy - 3.75f, iy1 = cy + 3.75f;
-    const int inner_vert = !(iy1 < by0 || by1 < iy0);
-    float rx0, rx1, ry0, ry1;
-    obj_rect(o, &rx0, &rx1, &ry0, &ry1);
-    const int inner_real = rect_hit(p->x - 3.75f, p->x + 3.75f, iy0, iy1, rx0, rx1, ry0, ry1);
-    if (o->passable) {   // one-way: catches an icon that is coming down onto it, nothing else
-        const float depth = fm > 0 ? ry1 - (cy - oh) : (cy + oh) - ry0;
-        if (depth >= 0 && depth <= 12.0f && p->yv * fm <= 0) {
-            p->y = fm > 0 ? ry1 + oh : ry0 - oh;
-            hit_ground(p);
-        }
-        return;
-    }
-    if (gm->head_safe && !ship) {   // bumped the head inside an H block: stay below the ceiling
-        const float depth = fm > 0 ? cy + oh - ry0 : ry1 - (cy - oh);
-        if ((cy - (ry0 + ry1) * 0.5f) * fm < 0 && depth <= 14.0f) {
-            p->y = fm > 0 ? ry0 - oh : ry1 + oh;
-            if (p->yv * fm > 0) p->yv = 0;
+    float x0, x1, y0, y1;
+    obj_rect(o, &x0, &x1, &y0, &y1);
+    const float s = (float)flip_mod(p), half = gd_body_half(p);
+    const int flies = p->mode == M_SHIP || p->mode == M_UFO || p->mode == M_SWING || p->mode == M_WAVE;
+    const int flyish = flies || p->mode == M_BALL;
+    const float tol = flies ? 6.0f : 10.0f, dy = p->y - p->prev_y;
+    const float feet = p->y - s * half + s * tol, head = p->y + s * half - s * tol;
+    const float feet_before = feet - dy, head_before = head - dy;
+    const int clear = s > 0 ? y0 >= feet || y0 >= feet_before : feet >= y1 || feet_before >= y1;
+    const int self = (int)(orig - gm->obj) + 1;
+    if ((gm->head_safe || gm->head_flip) && !flies) {   // the head runs into a block inside an H or F block
+        const float depth = s > 0 ? p->y + half - y0 : y1 - (p->y - half);
+        if ((p->y - (y0 + y1) * 0.5f) * s < 0 && depth <= 14.0f) {
+            p->y = s > 0 ? y0 - half : y1 + half;
+            if (gm->head_flip) {   // gravity turns around: the ceiling is the floor now
+                flip_gravity(p, !is_flipped(p));
+                hit_ground(p);
+            } else if (p->yv * s > 0) p->yv = 0;
             return;
         }
     }
-
-    if (is_flipped(p)) {
-        if (!ship) goto top_collision;
-        t = botP; b = topP;
-    }
-    if (b >= MaxY || t >= MaxY) {
-        if (p->yv < 0.0) {
-            if (inner_vert) goto death;
-            if (MaxYP >= mid) {
-                p->y = MaxY - rest;
-                hit_ground(p);
+    if (p->mode != M_WAVE || gm->dart_safe) {
+        // the block lies below the icon in the level: landing with normal gravity
+        const int below = s > 0 ? feet >= y1 || feet_before >= y1 : head >= y1 || head_before >= y1;
+        if ((s > 0 || (flyish && !o->passable)) && below) {
+            if (p->yv <= 0) {
+                p->y = y1 + half;
+                if (clear) p->yv = 0;
+                else land(p);
+            }
+            return;
+        }
+        // the block lies above: landing with flipped gravity, bumping into it when flying
+        if (s < 0 || (flyish && !o->passable)) {
+            const float at = s > 0 ? head : feet;
+            const int deep = y0 < at && y0 < at - dy;
+            if (!deep || self == ceil_before) {
+                if (p->yv >= 0) {
+                    p->y = y0 - half;
+                    if (clear) p->yv = 0;
+                    else land(p);
+                    p->ceil_obj = self;
+                }
+                return;
             }
         }
     }
-    if (!is_flipped(p)) {
-        if (!ship) goto death;
-        t = botP; b = topP;
+    if (o->passable) return;   // one-way blocks never kill
+    const float in = gd_inner_half(p);
+    if (!rect_hit(p->x - in, p->x + in, p->y - in, p->y + in, x0, x1, y0, y1)) return;
+    if (p->mode == M_SPIDER && p->spider_grace > 0 && p->x + in > x1) return;
+    if (clear && p->flip_grace > 0) {
+        p->y = s < 0 ? y1 + half : y0 - half;
+        hit_ground(p);
+        p->on_ground = 0;
+        return;
     }
-top_collision:
-    if (b <= MinY || t <= MinY) {
-        if (p->yv > 0.0) {
-            if (inner_vert) goto death;
-            if (MinYP <= mid) {
-                p->y = MinY - (p->mini ? 24.0f : 30.0f);
-                hit_ground(p);
-            }
-        }
-    }
-death:
-    if (!inner_real) return;
-    if (o->breakable) { touch(gm, orig); orig->off = 1; }   // the brick shatters (restored on the next attempt)
+    if (o->breakable) { trg_touch(gm, orig); orig->off = 1; trg_event(gm, 61); }   // the brick shatters (restored on the next attempt)
     else die_why(gm, "inner", o);
 }
 
-// Triangles: the icon slides along the long side; running into one of the short sides kills.
-// Ceiling slopes are handled by mirroring everything vertically.
+// Looks only: the icon lies flat on a slope of h by w, tilted like it.
+static void tilt_on_slope(const Game *gm, Player *p, int slope, float w, float h)
+{
+    float a = atan2f(h, w) * 180.0f / 3.14159265f;
+    if (slope & 2) a = -a;                                    // uphill: the front goes up
+    if (slope & 4) a = -a;                                    // hanging from a ceiling slope
+    if (gm->frame.fx * gm->frame.uy - gm->frame.fy * gm->frame.ux < 0) a = -a;   // mirrored movement
+    p->slope_rot = a;
+    p->slope_t = 0.05f;
+}
+
+// Triangles: the icon slides along the long side, down as well as up; running into one of the short
+// sides kills. Ceiling slopes are handled by mirroring everything vertically.
 static void slope_collide(Game *gm, Player *p, const Obj *o)
 {
     float x0, x1, y0, y1;
     obj_rect(o, &x0, &x1, &y0, &y1);
-    const float half = p->mini ? 9.0f : 15.0f;
+    const float half = gd_body_half(p), in = gd_inner_half(p);
     const int ceiling = o->slope & 4, high_right = o->slope & 2;
     const float m = ceiling ? -1.0f : 1.0f;       // mirrored frame: the solid part is below
     const float py = p->y * m, lo = ceiling ? -y1 : y0, hi = ceiling ? -y0 : y1;
@@ -1931,15 +1787,28 @@ static void slope_collide(Game *gm, Player *p, const Obj *o)
     const float surface = lo + (high_right ? t : 1.0f - t) * h;
     float rest = surface + lift;
     if (rest > hi + half) rest = hi + half;       // the top end continues as flat ground
-    if (py >= rest) return;                       // above the slope
     const int towards = p->grav * (ceiling ? -1 : 1) > 0; // gravity pulls onto this surface
     const int flies = p->mode == M_SHIP || p->mode == M_UFO || p->mode == M_SWING;
     const float step_rise = p->speed * STEP * h / w;
+    const int downhill = towards && !flies && !high_right && p->mode != M_WAVE;
+    // beyond the lower end the next slope or the ground takes over: it must not push up there
+    if (downhill && p->x > x1) return;
+    if (py >= rest) {   // above the slope
+        // An icon that was on the ground and has not jumped stays on a slope that falls away under
+        // it: it slides down instead of dropping, landing and dropping again.
+        if (downhill && p->x >= x0 && p->on_ground && !p->rising && p->yv * m <= 0.5 &&
+            py - rest <= half * h / w + 2.0f * step_rise + 3.0f) {
+            p->y = fmaxf(rest, py - 2.0f * step_rise - 1.5f) * m;
+            hit_ground(p);
+            tilt_on_slope(gm, p, o->slope, w, h);
+        }
+        return;
+    }
     const float tol = (p->mini ? 8.0f : 11.0f) + step_rise;
     // how deep the centre line of the icon is inside the triangle itself
     const int inside = p->x >= x0 - 3.0f && p->x <= x1 + 3.0f && py >= lo - half;
-    if (p->mode == M_WAVE) {
-        if (p->x + 4.0f > x0 && p->x - 4.0f < x1 && py - 4.0f < surface && py + 4.0f > lo) die_why(gm, "wave-slope", o);
+    if (p->mode == M_WAVE && !gm->dart_safe) {
+        if (p->x + half > x0 && p->x - half < x1 && py - half < surface && py + half > lo) die_why(gm, "wave-slope", o);
         return;
     }
     if ((towards || flies) && rest - py <= tol && inside) {
@@ -1951,13 +1820,68 @@ static void slope_collide(Game *gm, Player *p, const Obj *o)
         p->y = rest * m;
         if (towards) hit_ground(p);
         else p->yv = 0;
+        if (towards && !flies) tilt_on_slope(gm, p, o->slope, w, h);
         // going uphill: keep the upward speed, so that the icon takes off at the top end
         if (towards && high_right && t < 1.0f)
             p->yv = m * (double)(p->speed * STEP * h / w) / (FRAMES_PER_STEP * 0.9);
         return;
     }
     // inner box against the triangle: hit a short side, or came from the wrong direction
-    if (p->x + 3.75f > x0 && p->x - 3.75f < x1 && py + 3.75f > lo && py - 3.75f < surface) die_why(gm, "slope", o);
+    if (p->x + in > x0 && p->x - in < x1 && py + in > lo && py - in < surface) die_why(gm, "slope", o);
+}
+
+// Does a straight rectangle (the icon) overlap an object's box, which may be turned?
+static int box_hit(float ax0, float ax1, float ay0, float ay1, const Obj *o)
+{
+    float x0, x1, y0, y1;
+    obj_rect(o, &x0, &x1, &y0, &y1);
+    if (!rect_hit(ax0, ax1, ay0, ay1, x0, x1, y0, y1)) return 0;
+    if (o->tilt == 0) return 1;
+    // separating axes: the two of the turned box (the straight ones are covered by its bounds)
+    const float c = cosf(o->tilt), s = sinf(o->tilt), aw = (ax1 - ax0) * 0.5f, ah = (ay1 - ay0) * 0.5f;
+    const float dx = (ax0 + ax1) * 0.5f - (o->x + o->hx), dy = (ay0 + ay1) * 0.5f - (o->y + o->hy);
+    return fabsf(dx * c + dy * s) <= aw * fabsf(c) + ah * fabsf(s) + o->bw &&
+           fabsf(dy * c - dx * s) <= aw * fabsf(s) + ah * fabsf(c) + o->bh;
+}
+
+// The icon's outer box against a round hitbox. Old levels test whether the centre of the circle is
+// inside the box or a corner of the box inside the circle; newer ones (header kA39) compare the
+// distance of the centres.
+static int round_hit(const Game *gm, float px, float py, float half, const Obj *o)
+{
+    const float dx = fabsf(o->x - px), dy = fabsf(o->y - py);
+    if (gm->fix_radius) return dx * dx + dy * dy <= (half + o->rad) * (half + o->rad);
+    if (dx <= half && dy <= half) return 1;
+    return (dx - half) * (dx - half) + (dy - half) * (dy - half) < o->rad * o->rad;
+}
+
+// The hitbox of an object that triggers have turned since the level began (tmp holds the copy).
+static const Obj *posed(const Obj *o, Obj *tmp)
+{
+    const float d = o->rot - o->rot0;
+    if (o->spin != 0 || fabsf(d) < 0.01f || o->rad > 0 || o->hw <= 0) return o;
+    *tmp = *o;
+    if (o->type == OT_SOLID || o->type == OT_HBLOCK) {   // blocks and slopes: the nearest quarter turn
+        const int turns = (((int)lroundf(d / 90.0f)) % 4 + 4) % 4;
+        for (int i = 0; i < turns; i++) {
+            const float w = tmp->hw, x = tmp->hx;
+            tmp->hw = tmp->hh; tmp->hh = w;
+            tmp->hx = tmp->hy; tmp->hy = -x;
+            if (tmp->slope) {   // the corner with the right angle goes round clockwise
+                const int right = tmp->slope & 2, top = tmp->slope & 4;
+                tmp->slope = (unsigned char)(1 | (top ? 2 : 0) | (right ? 0 : 4));
+            }
+        }
+        return tmp;
+    }
+    const float a = d * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
+    tmp->hx = o->hx * c + o->hy * s;
+    tmp->hy = o->hy * c - o->hx * s;
+    const float t = -o->rot * 3.14159265f / 180.0f, q = o->rot / 90.0f;
+    tmp->hw = fabsf(cosf(t)) * o->bw + fabsf(sinf(t)) * o->bh;
+    tmp->hh = fabsf(sinf(t)) * o->bw + fabsf(cosf(t)) * o->bh;
+    tmp->tilt = fabsf(q - roundf(q)) > 0.001f ? t : 0;
+    return tmp;
 }
 
 static void set_ctr(Game *gm, int mode, float obj_y)
@@ -1992,6 +1916,11 @@ static void local_obj(Frame f, const Obj *o, Obj *out)
     to_local(f, o->x, o->y, &out->x, &out->y);
     to_local(f, o->hx, o->hy, &out->hx, &out->hy);
     if (f.fx == 0) { out->hw = o->hh; out->hh = o->hw; }
+    if (o->tilt != 0) {   // the turned box's first axis, seen from the frame
+        float ax, ay;
+        to_local(f, cosf(o->tilt), sinf(o->tilt), &ax, &ay);
+        out->tilt = atan2f(ay, ax);
+    }
     if (o->slope) {
         float cx, cy;
         to_local(f, (o->slope & 2) ? 1.0f : -1.0f, (o->slope & 4) ? 1.0f : -1.0f, &cx, &cy);
@@ -2000,13 +1929,14 @@ static void local_obj(Frame f, const Obj *o, Obj *out)
 }
 
 // Moves the player to the first object of a group (2.2 teleport portals and orbs).
-static int teleport_to_group(Game *gm, Player *p, int group)
+int gm_teleport(Game *gm, Player *p, int group)
 {
     if (group <= 0 || group >= GD_GROUPS || gm->grp_start[group] >= gm->grp_start[group + 1]) return 0;
     const Obj *t = &gm->obj[gm->grp_items[gm->grp_start[group]]];
     if (gm->local) to_local(gm->frame, t->x, t->y, &p->x, &p->y);
     else { p->x = t->x; p->y = t->y; }
     p->on_ground = 0;
+    p->trail_n = 0;
     return 1;
 }
 
@@ -2017,6 +1947,7 @@ static void apply_portal(Game *gm, Player *p, const Obj *o)
     switch (o->sub) {
     case P_GRAV_DOWN: flip_gravity(p, 0); break;
     case P_GRAV_UP: flip_gravity(p, 1); break;
+    case P_GRAV_TOGGLE: flip_gravity(p, !is_flipped(p)); break;
     case P_CUBE: mode = M_CUBE; break;
     case P_SHIP: mode = M_SHIP; break;
     case P_BALL: mode = M_BALL; break;
@@ -2043,7 +1974,7 @@ static void apply_portal(Game *gm, Player *p, const Obj *o)
         if (is1) gm->dual = 0;
         break;
     case P_TELEPORT:
-        if (!teleport_to_group(gm, p, o->tgroup)) p->y = o->y + o->tdy;   // exit height relative to the entry
+        if (!gm_teleport(gm, p, o->tgroup)) p->y = o->y + o->tdy;   // exit height relative to the entry
         if (is1 && gm->has_jumps && !rotated(gm)) set_ctr(gm, p->mode, p->y);
         if (o->tforce != 0) p->yv = o->tforce;
         if (o->tgrav) {   // only the direction of gravity changes, the icon keeps its momentum
@@ -2055,6 +1986,15 @@ static void apply_portal(Game *gm, Player *p, const Obj *o)
         break;
     case P_SWING: mode = M_SWING; break;
     default: break;
+    }
+    if (is1 && gm->logic.nlisten) {
+        const int e = o->sub == P_TELEPORT ? 59 : mode >= 0 ? 26 + (mode == M_SHIP ? 1 : mode == M_BALL ? 2 : mode == M_UFO ? 3
+                    : mode == M_WAVE ? 4 : mode == M_ROBOT ? 5 : mode == M_SPIDER ? 6 : mode == M_SWING ? 7 : 0)
+                    : o->sub == P_MIRROR_ON ? 53 : o->sub == P_MIRROR_OFF ? 54 : o->sub == P_SIZE_NORMAL ? 55
+                    : o->sub == P_SIZE_MINI ? 56 : o->sub == P_DUAL_ON ? 57 : o->sub == P_DUAL_OFF ? 58
+                    : o->sub == P_GRAV_DOWN ? 51 : o->sub == P_GRAV_UP ? 52
+                    : o->sub == P_GRAV_TOGGLE ? (is_flipped(p) ? 52 : 51) : 0;
+        trg_event(gm, e);
     }
     if (mode >= 0) {
         if (is1) gm->free = o->freemode;
@@ -2077,6 +2017,60 @@ static void trail_push(Player *p)
     if (p->trail_n < 64) p->trail_n++;
 }
 
+int game_coins(const Game *gm)
+{
+    int mask = 0;
+    for (int k = 0; k < gm->ncoins; k++) mask |= gm->obj[gm->coin_obj[k]].used ? 1 << k : 0;
+    return mask;
+}
+
+static int coin_number(const Game *gm, const Obj *o)
+{
+    for (int k = 0; k < gm->ncoins; k++)
+        if (&gm->obj[gm->coin_obj[k]] == o) return k;
+    return -1;
+}
+
+// Either icon takes the coin; it is back with the next attempt. Only finishing the level keeps it.
+static void coin_collect(Game *gm, Obj *o)
+{
+    o->used = o->used2 = 1;
+    const int k = coin_number(gm, o);
+    if (gm->sim || k < 0) return;
+    const int user = o->id == 1329, owned = (gm->coins_owned >> k) & 1;
+    gm->coin_fly[k] = (CoinFly){o->x, o->y, 0.0001f, frand() * 120.0f - 60.0f, (unsigned char)user,
+                                (unsigned char)owned};
+    const float r = user ? 225.0f : 255.0f, g = user ? 235.0f : 215.0f, b = user ? 245.0f : 40.0f;
+    emit_burst(gm, o->x, o->y, 22, 170.0f, 0.6f, 7.0f, r, g, b);
+}
+
+// Looks only: the streak's points and the ages of what a dash draws, once per step.
+static void streak_step(const Game *gm, Player *p)
+{
+    if (p->streak && !p->dashing && !walks(p)) p->streak = 0;
+    if (p->mode != M_WAVE) {
+        if (p->streak) {
+            p->streak_idle = 0;
+            if ((++p->trail_tick & 1) == 0 || p->trail_n == 0) trail_push(p);
+        } else if (p->trail_n && (p->streak_idle += STEP) > STREAK_TIME) p->trail_n = 0;
+    }
+    if (p->dashing) {   // the direction of flight as the screen shows it
+        const Frame f = gm->frame;
+        p->dash_angle = -atan2f(f.fy + f.uy * p->dash_slope, f.fx + f.ux * p->dash_slope) * 180.0f / 3.14159265f;
+        p->dash_age += STEP;
+    } else if (p->dash_age > 0) {   // the flame flies off
+        p->dash_age = 0;
+        p->off_age = STEP;
+        p->off_x = p->x; p->off_y = p->y;
+        p->off_angle = p->dash_angle;
+    }
+    if (p->boom_age < 0) {
+        p->boom_age = STEP;
+        p->boom_x = p->x; p->boom_y = p->y;
+    } else if (p->boom_age > 0 && (p->boom_age += STEP) > 0.45f) p->boom_age = 0;
+    if (p->off_age > 0 && (p->off_age += STEP) > 0.2f) p->off_age = 0;
+}
+
 static void spider_teleport(Game *gm, Player *p);
 
 // PlayLayer::checkCollisions for one player. In a rotated movement frame the player is given in that
@@ -2088,9 +2082,10 @@ static void check_collisions(Game *gm, Player *p)
     if (rot) to_world(gm->frame, p->x, p->y, &wpx, &wpy);
     const int is1 = p == &gm->p;
     const int wave = p->mode == M_WAVE;
-    const float oh = p->mini ? 9.0f : 15.0f;
-    const float bh = wave ? (p->mini ? 3.0f : 5.0f) : oh;   // body box used against blocks/hazards
-    float floor_y = p->mini ? 9.0f : 15.0f, ceil_y = 0;
+    const float oh = gd_body_half(p);   // half of the outer box
+    float floor_y = gd_floor_half(p), ceil_y = 0;
+    const int ceil_before = p->ceil_obj;
+    p->ceil_obj = 0;
 
     if (gm->has_jumps && (wpy < -200.0f || wpy > 4000.0f || wpx < -300.0f)) { die_why(gm, "outside", NULL); return; }
     // rotate triggers of the active channel fire when passed in the current movement direction
@@ -2101,9 +2096,9 @@ static void check_collisions(Game *gm, Player *p)
             float tx = t->x, ty = t->y;
             if (rot) to_local(gm->frame, t->x, t->y, &tx, &ty);
             if (p->x < tx || p->x > tx + 400.0f) continue;
-            touch(gm, t);
+            trg_touch(gm, t);
             t->tdone = 1;
-            fire_trigger(gm, t, 0);
+            trg_fire(gm, t, 0);
             break;
         }
     }
@@ -2157,72 +2152,61 @@ static void check_collisions(Game *gm, Player *p)
             if (want >= 0 && want != p->mode) { die_why(gm, "missed portal", o); return; }
         }
     }
-    gm->head_safe = 0;
+    gm->head_safe = gm->head_flip = gm->dart_safe = 0;
     for (int ci = 0; ci < nc; ci++) {
         const Obj *o = &gm->obj[cand[ci]];
         Obj turned;
         if (o->type != OT_HBLOCK || o->off) continue;
         if (rot) { local_obj(gm->frame, o, &turned); o = &turned; }
-        if (fabsf(p->x - o->x) < oh + o->hw && fabsf(p->y - o->y) < oh + o->hh) gm->head_safe = 1;
+        if (fabsf(p->x - o->x) >= oh + o->hw || fabsf(p->y - o->y) >= oh + o->hh) continue;
+        if (o->sub == SB_HEAD) gm->head_safe = 1;
+        else if (o->sub == SB_FLIP) gm->head_flip = 1;
+        else if (o->sub == SB_DART) gm->dart_safe = 1;
+        else p->dashing = 0;
     }
-    for (int pass = 0; pass < 2; pass++) {
-        for (int ci = 0; ci < nc; ci++) {
-            Obj *r = &gm->obj[cand[ci]], turned;   // r holds the state, o the geometry
+    // first triggers, portals, pads, orbs and slopes, then the blocks, then everything deadly
+    int blocks[256], nb = 0;
+    for (int ci = 0; ci < nc; ci++) {
+        {
+            Obj *r = &gm->obj[cand[ci]], turned, local;   // r holds the state, o the geometry
             if (r->off) continue;
-            const Obj *o = r;
-            if (rot) { local_obj(gm->frame, r, &turned); o = &turned; }
+            const Obj *o = posed(r, &turned);
+            if (rot) { local_obj(gm->frame, o, &local); o = &local; }
             if (o->type == OT_TRIGGER) {
                 // normal triggers fire when passed, touch triggers only when the icon runs into them
                 const int reached = o->touch ? fabsf(p->x - o->x) <= oh + 15.0f && fabsf(p->y - o->y) <= oh + 15.0f
                                              : p->x >= o->x;
-                if (is1 && pass == 0 && !r->tdone && !r->spawn_only && reached && r->tid != 2900 &&
+                if (is1 && !r->tdone && !r->spawn_only && reached && r->tid != 2900 &&
                     (r->touch || r->channel == gm->channel)) {
-                    touch(gm, r);
+                    trg_touch(gm, r);
                     r->tdone = 1;
-                    fire_trigger(gm, r, 0);
+                    trg_fire(gm, r, 0);
                 }
                 continue;
             }
             if (o->type == OT_DECO || o->type == OT_HIDDEN || o->type == OT_SENSOR || o->type == OT_HBLOCK) continue;
-            if (o->hw <= 0 || o->hh <= 0) { if (o->rad <= 0) continue; }
-            if ((o->type == OT_HAZARD) != (pass == 1)) continue;
-
-            float x0, x1, y0, y1;
-            obj_rect(o, &x0, &x1, &y0, &y1);
-            if (pass == 1) {
-                if (o->slope) {   // sloped spike pit: only the filled half of the rectangle
-                    const float hx = p->x < x0 ? x0 : p->x > x1 ? x1 : p->x;
-                    float t = x1 > x0 ? (hx - x0) / (x1 - x0) : 0;
-                    if (!(o->slope & 2)) t = 1.0f - t;
-                    const float fill = t * (y1 - y0) - 6.0f;
-                    const int in = p->x + bh * 0.5f > x0 && p->x - bh * 0.5f < x1 &&
-                                   ((o->slope & 4) ? p->y + bh * 0.5f > y1 - fill && p->y - bh * 0.5f < y1
-                                                   : p->y - bh * 0.5f < y0 + fill && p->y + bh * 0.5f > y0);
-                    if (in) { die_why(gm, "hazard", o); return; }
-                    continue;
-                }
-                int hit = o->rad > 0 ? circle_hit(p->x - bh, p->x + bh, p->y - bh, p->y + bh, o->x, o->y, o->rad)
-                                     : rect_hit(p->x - bh, p->x + bh, p->y - bh, p->y + bh, x0, x1, y0, y1);
-                if (hit) { die_why(gm, "hazard", o); return; }
-                continue;
-            }
-            int *used = is1 ? &r->used : &r->used2;
+            if (o->hw <= 0 || o->hh <= 0 || o->type == OT_HAZARD) continue;
             if (o->type == OT_SOLID) {
                 if (o->slope) {
-                    if (rect_hit(p->x - oh - 1.0f, p->x + oh + 1.0f, p->y - oh * 2.0f, p->y + oh * 2.0f, x0, x1, y0, y1))
+                    float x0, x1, y0, y1;
+                    obj_rect(o, &x0, &x1, &y0, &y1);
+                    const float h = gd_body_half(p);
+                    if (rect_hit(p->x - h - 1.0f, p->x + h + 1.0f, p->y - h * 2.0f, p->y + h * 2.0f, x0, x1, y0, y1))
                         slope_collide(gm, p, o);
                     if (gm->p.dead) return;
-                    continue;
+                } else if (nb < 256 && fabsf(p->x - (o->x + o->hx)) <= o->hw + 40.0f &&
+                           fabsf(p->y - (o->y + o->hy)) <= o->hh + 40.0f) {
+                    int k = nb++;   // the order of the original: the last object of the level first
+                    while (k > 0 && blocks[k - 1] < cand[ci]) { blocks[k] = blocks[k - 1]; k--; }
+                    blocks[k] = cand[ci];
                 }
-                if (!rect_hit(p->x - bh, p->x + bh, p->y - bh, p->y + bh, x0, x1, y0, y1)) continue;
-                if (wave) { die_why(gm, "wave-block", o); return; }
-                collided(gm, p, o, r);
-                if (gm->p.dead) return;
                 continue;
             }
-            if (!rect_hit(p->x - oh, p->x + oh, p->y - oh, p->y + oh, x0, x1, y0, y1)) continue;
+            const float h = gd_body_half(p);   // a portal may just have changed the form
+            if (!box_hit(p->x - h, p->x + h, p->y - h, p->y + h, o)) continue;
+            int *used = is1 ? &r->used : &r->used2;
             if (*used) continue;
-            if (o->type != OT_FORCE) touch(gm, r);
+            if (o->type != OT_FORCE) trg_touch(gm, r);
             if (o->type == OT_FORCE) {   // pushes along its arrow while touched
                 const float a = r->rot * 3.14159265f / 180.0f;
                 float lx, ly;
@@ -2237,7 +2221,13 @@ static void check_collisions(Game *gm, Player *p)
                 apply_portal(gm, p, o);
                 break;
             case OT_SPEED: p->speed = k_speeds[o->sub]; break;
+            case OT_COIN: coin_collect(gm, r); break;
             case OT_PAD:
+                if (is1 && gm->logic.nlisten) {
+                    trg_event(gm, 9);
+                    trg_event(gm, o->sub == K_YELLOW ? 45 : o->sub == K_PINK ? 46 : o->sub == K_RED ? 47
+                                : o->sub == K_BLUE ? 48 : o->sub == K_SPIDER ? 49 : 0);
+                }
                 if (o->sub == K_SPIDER) {
                     *used = 1;
                     spider_teleport(gm, p);
@@ -2266,8 +2256,8 @@ static void check_collisions(Game *gm, Player *p)
                     if (!(p->queued && p->hold)) break;
                     *used = 1;
                     p->queued = 0;
-                    if (o->sub == K_TOGGLE) activate_group(gm, o->tgroup, o->tact, 0);
-                    else if (o->sub == K_TELEPORT) teleport_to_group(gm, p, o->tgroup);
+                    if (o->sub == K_TOGGLE) trg_activate(gm, o->tgroup, o->tact, 0);
+                    else if (o->sub == K_TELEPORT) gm_teleport(gm, p, o->tgroup);
                     else spider_teleport(gm, p);
                     break;
                 }
@@ -2281,6 +2271,11 @@ static void check_collisions(Game *gm, Player *p)
                 {
                     int was_used = *used;
                     ring_jump(p, o, used);
+                    if (!was_used && *used && is1 && gm->logic.nlisten) {
+                        static const short ev[] = {0, 34, 37, 35, 38, 36, 39, 41, 42, 40, 43, 44};
+                        trg_event(gm, 8);
+                        trg_event(gm, o->sub >= 0 && o->sub < 12 ? ev[o->sub] : 0);
+                    }
                     if (!was_used && *used) {
                         float r, g, b;
                         kind_rgb(o->sub, &r, &g, &b);
@@ -2293,6 +2288,43 @@ static void check_collisions(Game *gm, Player *p)
             }
         }
     }
+    for (int i = 0; i < nb; i++) {
+        Obj *r = &gm->obj[blocks[i]], turned, local;
+        if (r->off) continue;
+        const Obj *o = posed(r, &turned);
+        if (rot) { local_obj(gm->frame, o, &local); o = &local; }
+        float x0, x1, y0, y1;
+        obj_rect(o, &x0, &x1, &y0, &y1);
+        const float h = gd_body_half(p);
+        if (!rect_hit(p->x - h, p->x + h, p->y - h, p->y + h, x0, x1, y0, y1)) continue;
+        collided(gm, p, o, r, ceil_before);
+        if (gm->p.dead) return;
+    }
+    const float half = gd_body_half(p);
+    for (int ci = 0; ci < nc; ci++) {
+        const Obj *r = &gm->obj[cand[ci]];
+        Obj turned, local;
+        if (r->off || r->type != OT_HAZARD) continue;
+        const Obj *o = posed(r, &turned);
+        if (rot) { local_obj(gm->frame, o, &local); o = &local; }
+        if (o->hw <= 0 || o->hh <= 0) continue;
+        float x0, x1, y0, y1;
+        obj_rect(o, &x0, &x1, &y0, &y1);
+        if (o->slope) {   // sloped spike pit: only the filled half of the rectangle
+            const float hx = p->x < x0 ? x0 : p->x > x1 ? x1 : p->x;
+            float t = x1 > x0 ? (hx - x0) / (x1 - x0) : 0;
+            if (!(o->slope & 2)) t = 1.0f - t;
+            const float fill = t * (y1 - y0) - 6.0f;
+            const int in = p->x + half * 0.5f > x0 && p->x - half * 0.5f < x1 &&
+                           ((o->slope & 4) ? p->y + half * 0.5f > y1 - fill && p->y - half * 0.5f < y1
+                                           : p->y - half * 0.5f < y0 + fill && p->y + half * 0.5f > y0);
+            if (in) { die_why(gm, "hazard", o); return; }
+            continue;
+        }
+        const int hit = o->rad > 0 ? round_hit(gm, p->x, p->y, half, o)
+                                   : box_hit(p->x - half, p->x + half, p->y - half, p->y + half, o);
+        if (hit) { die_why(gm, "hazard", o); return; }
+    }
     if (p->mode == M_SHIP) p->queued = 0;
 }
 
@@ -2300,7 +2332,7 @@ static void check_collisions(Game *gm, Player *p)
 // floor/ceiling in the new gravity direction).
 static void spider_teleport(Game *gm, Player *p)
 {
-    const float oh = p->mini ? 9.0f : 15.0f;
+    const float oh = gd_body_half(p);
     float fl, ce;
     region(gm, p, &fl, &ce);
     const int rot = rotated(gm);
@@ -2360,6 +2392,8 @@ static void spider_teleport(Game *gm, Player *p)
     p->on_ground = 1;
     p->rising = 0;
     p->last_ground_y = p->y;
+    p->spider_grace = 0.04f;
+    p->ceil_obj = 0;
 }
 
 static void step_player(Game *gm, Player *p)
@@ -2367,6 +2401,16 @@ static void step_player(Game *gm, Player *p)
     // running rotation action / snap back to a multiple of 90 degrees
     if (p->mode == M_BALL) {
         p->rot += 720.0f * STEP * (float)flip_mod(p);
+    } else if (p->dashing && p->mode == M_CUBE) {
+        p->rot = fmodf(p->rot + 960.0f * STEP * (float)flip_mod(p), 360.0f);
+        p->snap = 1;
+    } else if (p->slope_t > 0 && !p->rising && (p->mode == M_CUBE || p->mode == M_ROBOT || p->mode == M_SPIDER)) {
+        // the nearest way to lie flat on the slope (the cube on any of its four sides)
+        const float turn = p->mode == M_CUBE ? 90.0f : 360.0f;
+        const float target = p->slope_rot + floorf((p->rot - p->slope_rot) / turn + 0.5f) * turn;
+        p->rot += (target - p->rot) * fminf(1.0f, STEP / 0.04f);
+        p->rot_left = 0;
+        p->snap = 1;
     } else if (p->rot_left > 0) {
         float s = p->rot_rate * STEP;
         if (s > p->rot_left) s = p->rot_left;
@@ -2377,6 +2421,8 @@ static void step_player(Game *gm, Player *p)
         p->rot += (target - p->rot) * fminf(1.0f, STEP / 0.075f);
         if (fabsf(target - p->rot) < 0.05f) { p->rot = target; p->snap = 0; }
     }
+
+    if (p->slope_t > 0) p->slope_t -= STEP;
 
     // physics runs in the movement frame; positions are stored in level coordinates
     const int rot = rotated(gm);
@@ -2390,6 +2436,9 @@ static void step_player(Game *gm, Player *p)
     const double dt = FRAMES_PER_STEP;
     const double dt_slow = dt * 0.9;
     const float prev_y = p->y;
+    p->prev_y = prev_y;
+    if (p->flip_grace > 0) p->flip_grace -= STEP;
+    if (p->spider_grace > 0) p->spider_grace -= STEP;
     if (p->mode == M_WAVE) {
         float dir = (p->hold ? 1.0f : -1.0f) * (float)flip_mod(p);
         float sp = p->speed * STEP * (p->mini ? 2.0f : 1.0f);
@@ -2414,6 +2463,7 @@ static void step_player(Game *gm, Player *p)
 
     const int grav_before = p->grav;
     check_collisions(gm, p);
+    p->fresh = 0;
     // rotated and free sections have no floor: an icon that only falls for 1.5 s has left the level
     if (gm->has_jumps && p->mode != M_SHIP && p->mode != M_SWING && p->mode != M_UFO && p->mode != M_WAVE &&
         !p->on_ground && fabs(p->yv) >= 14.9) {
@@ -2423,7 +2473,7 @@ static void step_player(Game *gm, Player *p)
     if (rot) to_world(gm->frame, lx, ly, &p->x, &p->y);
     gm->local = 0;
     // dual mode: while both icons have the same form, their gravities stay opposite
-    if (gm->dual && p->grav != grav_before) {
+    if (gm->dual && p->grav != grav_before && !(gm->logic.options & OPT_FREE_DUAL)) {
         Player *other = p == &gm->p ? &gm->p2 : &gm->p;
         if (other->mode == p->mode) flip_gravity(other, p->grav > 0);
     }
@@ -2440,11 +2490,11 @@ static void step_player(Game *gm, Player *p)
         float ang = -atan2f(dy, dx) * 180.0f / 3.14159265f;
         if (fabsf(dy) < 1e-4f) ang = 0;
         p->rot = ang;
-        static int tick;
-        if ((++tick & 1) == 0 || p->trail_n == 0) trail_push(p);
-    } else if (p->mode == M_UFO || p->mode == M_SPIDER) {
+        if ((++p->trail_tick & 1) == 0 || p->trail_n == 0) trail_push(p);
+    } else if (p->mode == M_UFO || (p->mode == M_SPIDER && p->slope_t <= 0)) {
         p->rot = 0;
     }
+    streak_step(gm, p);
 }
 
 static void step(Game *gm, float d)
@@ -2460,11 +2510,20 @@ static void step(Game *gm, float d)
     } else {
         gm->cam_target = gm->cam_bottom + 90.0f;
     }
-    triggers_step(gm);
-    if (gm->logic.nwatch) logic_step(gm);
+    trg_step(gm);
     {
         int g1 = gm->p.on_ground, g2 = gm->p2.on_ground;
+        const double fall = gm->p.yv;
+        const int grav = gm->p.grav, dash = gm->p.dashing;
         step_player(gm, &gm->p);
+        if (gm->logic.nlisten && !gm->p.dead) {
+            if (gm->p.on_ground && !g1) {   // landings, told apart by the speed of the fall (own limits)
+                const double v = fabs(fall);
+                trg_event(gm, gm->p.mini ? 1 : v < 5 ? 2 : v < 9 ? 3 : v < 13 ? 4 : 5);
+            }
+            if (gm->p.grav != grav) trg_event(gm, gm->p.grav < 0 ? 10 : 11);
+            if ((gm->p.dashing != 0) != (dash != 0)) trg_event(gm, gm->p.dashing ? 23 : 24);
+        }
         player_fx(gm, &gm->p, g1);
         if (gm->dual && !gm->p.dead) { step_player(gm, &gm->p2); player_fx(gm, &gm->p2, g2); }
     }
@@ -2510,6 +2569,7 @@ void game_update(Game *gm, float dt)
     particles_step(gm, dt);
     ghosts_step(gm, dt);
     if (gm->shake_left > 0) gm->shake_left -= dt;
+    trg_camera_step(&gm->view, dt);
     // pulses and alpha fades
     for (int i = 0; i < gm->npu;) {
         Pulse *pl = &gm->pu[i];
@@ -2538,8 +2598,9 @@ void game_update(Game *gm, float dt)
 
     if (gm->p.dead) {
         gm->p.dead_t += dt;
+        if (!gm->dead_fx) trg_death(gm);   // once per crash
         death_fx(gm);
-        if (gm->p.dead_t > 1.0f) { // restart attempt
+        if (gm->p.dead_t > (gm->logic.respawn > 0 ? gm->logic.respawn : 1.0f)) { // restart attempt
             int att = gm->attempts + 1;
             float best = gm->best_percent;
             if (gm->practice) { const GameCheckpoint *cp = gm->practice; game_checkpoint_restore(gm, cp); gm->dead_fx = 0; gm->npt = 0; gm->p.dead = 0; gm->p.dead_t = 0; gm->p.hold = gm->p.queued = gm->input; }
@@ -2742,6 +2803,14 @@ static void group_pulses(const Game *gm, const Obj *o, GdColorF *c, int part)
     }
 }
 
+static GdColorF chan_color(const Game *gm, int id, float *additive);
+
+GdColorF gm_channel(const Game *gm, int id)
+{
+    float additive;
+    return chan_color(gm, id, &additive);
+}
+
 static GdColorF chan_color(const Game *gm, int id, float *additive)
 {
     GdColorF c = chan_color_d(gm, id, additive, 0);
@@ -2815,7 +2884,7 @@ static void draw_beast(Game *gm, Gfx *g, const Obj *o, int which, float cx, floa
             const float x = cx + (dx * c + dy * sn) * unit, y = cy - (-dx * sn + dy * c) * unit;
             const float rot = o->rot + p->rot * turn;
             if (pass == 0) {
-                if (p->glow) gfx_frame(g, p->glow, x, y, rot, o->sx * p->sx * s, o->sy * p->sy * s, lit, 1);
+                if (p->glow && !g->no_glow) gfx_frame(g, p->glow, x, y, rot, o->sx * p->sx * s, o->sy * p->sy * s, lit, 1);
             } else {
                 gfx_frame(g, p->f, x, y, rot, o->sx * p->sx * s, o->sy * p->sy * s, eye ? white : body, 0);
             }
@@ -2892,7 +2961,7 @@ static void draw_sparks(const Game *gm, Gfx *g, const Obj *o, float cx, float cy
     case K_SPIDER: cr = 170; cg = 80; cb = 255; break;
     default: break;
     }
-    const int pad = o->type == OT_PAD, n = 18;
+    const int pad = o->type == OT_PAD, n = g->no_particles ? 0 : 18;
     const float r = o->rot * 3.14159265f / 180.0f, c = cosf(r), sn = sinf(r);
     for (int i = 0; i < n; i++) {
         const float life = gm->anim_t * (pad ? 1.9f : 1.6f) + (float)i / n + o->x * 0.0113f;
@@ -2994,6 +3063,7 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     }
     if (o->hsv1) obj_hsv(gm, o->hsv1, &col);
     if (gm->npu) group_pulses(gm, o, &col, 1);
+    if (gm->tinted) motion_tint(gm, &col);
     col.a *= oa;
     if (o->fill) add = 0;
     if (o->faint && o->ch_main == CH_BLACK) col.a *= 0.3f;
@@ -3048,6 +3118,7 @@ static void draw_obj_layer(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
         GdColorF dc = chan_color(gm, o->ch_detail, &add);
         if (o->hsv2) obj_hsv(gm, o->hsv2, &dc);
         if (gm->npu) group_pulses(gm, o, &dc, 2);
+        if (gm->tinted) motion_tint(gm, &dc);
         dc.a *= oa;
         gfx_frame(g, o->detail, cx, cy, o->rot, o->sx * s, o->sy * s, dc, (int)add);
     }
@@ -3075,7 +3146,7 @@ static void draw_portal_fx(Game *gm, Gfx *g, const Obj *o, float cx, float cy, f
     const float flip = o->sx < 0 ? -1.0f : 1.0f;
     // dots drifting into the portal
     const float hh = o->hh > 8 ? o->hh : 30.0f;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 10 && !g->no_particles; i++) {
         float ph = fmodf(t * 0.8f + i / 10.0f + o->x * 0.0071f, 1.0f);
         float ang = i * 2.399f + o->x * 0.37f;
         float r = 1.0f - ph;
@@ -3099,7 +3170,6 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
     const float mini = p->mini ? 0.6f : 1.0f;
     const float k = mini * s;
     const float flip = (float)p->grav;
-    const float up = 5.0f * scale * mini * flip; // the little cube sits 5 units above the vehicle centre
     rot += atan2f((float)gm->frame.ux, (float)gm->frame.uy) * 180.0f / 3.14159265f;   // turned gameplay
     if ((p->mode == M_ROBOT || p->mode == M_SPIDER) && gm->anim) {
         const int robot = p->mode == M_ROBOT;
@@ -3113,20 +3183,20 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
             return;
         }
     }
-    // the little cube that sits in the ship and the UFO
 #define DRAW(form, x, y, r, sx, sy) \
     gfx_icon_draw(g, g_icon_types[form], icon_id(gm, form), x, y, r, sx, sy, c1, c2)
+    // Ship and UFO as in the original: the little cube sits 5 units above the player's centre, the
+    // ship 5 and the UFO 7 units below it, along the vehicle's own "up".
+    const float a = rot * 3.14159265f / 180.0f, unit = scale * mini * flip;
+    const float upx = sinf(a) * unit, upy = -cosf(a) * unit;
     switch (p->mode) {
-    case M_SHIP: {
-        // the cube follows the ship tilt: offset along the ship local "up" direction
-        const float a = rot * 3.14159265f / 180.0f;
-        DRAW(IC_CUBE, px + sinf(a) * up, py - cosf(a) * up, rot, k * 0.55f, k * 0.55f * flip);
-        DRAW(IC_SHIP, px, py, rot, k, k * flip);
+    case M_SHIP:
+        DRAW(IC_CUBE, px + upx * 5.0f, py + upy * 5.0f, rot, k * 0.55f, k * 0.55f * flip);
+        DRAW(IC_SHIP, px - upx * 5.0f, py - upy * 5.0f, rot, k, k * flip);
         break;
-    }
     case M_UFO:
-        DRAW(IC_CUBE, px, py - 4.0f * scale * mini * flip, 0, k * 0.55f, k * 0.55f * flip);
-        DRAW(IC_UFO, px, py, 0, k, k * flip);
+        DRAW(IC_CUBE, px + upx * 5.0f, py + upy * 5.0f, rot, k * 0.55f, k * 0.55f * flip);
+        DRAW(IC_UFO, px - upx * 7.0f, py - upy * 7.0f, rot, k, k * flip);
         break;
     case M_SWING: DRAW(IC_SWING, px, py, rot, k, k * flip); break;
     case M_BALL:  DRAW(IC_BALL, px, py, rot, k, k); break;
@@ -3140,6 +3210,108 @@ static void draw_icon(Game *gm, Gfx *g, const Player *p, float px, float py, flo
 static float g_ox, g_oy, g_vh, g_scale;
 static float trail_sx(const Game *gm, float x) { return g_ox + (x - gm->cam_x) * g_scale; }
 static float trail_sy(const Game *gm, float y) { return g_oy + (g_vh - (y - gm->cam_bottom)) * g_scale; }
+
+// The streak: a soft band along the last positions that fades with their age. (hx, hy): where the
+// icon is drawn right now.
+static void draw_streak(Game *gm, Gfx *g, const Player *p, float hx, float hy, float scale, int swap)
+{
+    if (p->trail_n < 2) return;
+    float add;
+    const GdColorF c = chan_color(gm, swap ? CH_P1 : CH_P2, &add);
+    const float half = (p->mini ? 3.0f : 5.0f) * scale;
+    static const float across[4] = {-1.0f, -0.4f, 0.4f, 1.0f}, strong[4] = {0, 0.7f, 0.7f, 0};
+    float px[65], py[65], age[65];
+    int n = 0;
+    if (p->streak) { px[n] = trail_sx(gm, hx); py[n] = trail_sy(gm, hy); age[n++] = 0; }
+    for (int i = 0; i < p->trail_n; i++) {
+        const int a = (p->trail_i - i - 1) & 63;
+        const float x = trail_sx(gm, p->trail[a][0]), y = trail_sy(gm, p->trail[a][1]);
+        if (n && p->streak && i == 0 && fabsf(x - px[0]) < 0.5f && fabsf(y - py[0]) < 0.5f) continue;
+        px[n] = x; py[n] = y; age[n++] = p->streak_idle + (float)i * 2.0f * STEP;
+    }
+    float last_x = 0, last_y = 0, last_a = 0, nx0 = 0, ny0 = 0;
+    for (int i = 0; i < n; i++) {
+        const int before = i > 0 ? i - 1 : i, after = i + 1 < n ? i + 1 : i;
+        float dx = px[after] - px[before], dy = py[after] - py[before];
+        const float len = hypotf(dx, dy);
+        const float nx = len > 0.01f ? -dy / len : nx0, ny = len > 0.01f ? dx / len : ny0;
+        const float a = fmaxf(0.0f, 1.0f - age[i] / STREAK_TIME);
+        if (i > 0 && (a > 0 || last_a > 0)) {
+            for (int k = 0; k < 3; k++) {
+                const float qx[4] = {last_x + nx0 * half * across[k], last_x + nx0 * half * across[k + 1],
+                                     px[i] + nx * half * across[k + 1], px[i] + nx * half * across[k]};
+                const float qy[4] = {last_y + ny0 * half * across[k], last_y + ny0 * half * across[k + 1],
+                                     py[i] + ny * half * across[k + 1], py[i] + ny * half * across[k]};
+                GdColorF q[4] = {c, c, c, c};
+                q[0].a = last_a * strong[k]; q[1].a = last_a * strong[k + 1];
+                q[2].a = a * strong[k + 1]; q[3].a = a * strong[k];
+                gfx_quad_colors(g, qx, qy, q, 1);
+            }
+        }
+        last_x = px[i]; last_y = py[i]; last_a = a; nx0 = nx; ny0 = ny;
+    }
+}
+
+static GdColorF mix_colour(GdColorF a, GdColorF b, float k)
+{
+    k = fminf(fmaxf(k, 0.0f), 1.0f);
+    return (GdColorF){a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k, a.a + (b.a - a.a) * k};
+}
+
+// One flame of a dash: the fire (added light) with its outline.
+static void draw_flame(Gfx *g, int frame, float x, float y, float rot, float sx, float sy, GdColorF c)
+{
+    char name[40];
+    snprintf(name, sizeof name, "playerDash2_%03d.png", frame);
+    const GdFrame *fire = gfx_find(g, name);
+    snprintf(name, sizeof name, "playerDash2_outline_%03d.png", frame);
+    const GdFrame *line = gfx_find(g, name);
+    if (fire) gfx_frame(g, fire, x, y, rot, sx, sy, c, 1);
+    if (line) gfx_frame(g, line, x, y, rot, sx, sy, (GdColorF){255, 255, 255, c.a * 150.0f / 255.0f}, 0);
+}
+
+// What a dash draws behind the icon. (x, y): the icon on the screen; the other parts stay where
+// they began. Sizes and timing as in the original (PlayerObject::startDashing / stopDashing).
+static void draw_dash(Game *gm, Gfx *g, const Player *p, float x, float y, float scale, int swap)
+{
+    float add;
+    GdColorF colour = chan_color(gm, swap ? CH_P1 : CH_P2, &add);
+    colour.a = 1;
+    const GdColorF white = {255, 255, 255, 1};
+    const float s = scale / g->atlas.px_per_unit * (p->mini ? 0.6f : 1.0f);
+    if (p->boom_age > 0) {
+        char name[40];
+        const int n = 1 + (int)(p->boom_age / 0.05f);
+        snprintf(name, sizeof name, "playerDash2_boom2_%03d.png", n > 9 ? 9 : n);
+        const GdFrame *f = gfx_find(g, name);
+        const GdColorF orb = p->boom_flip ? (GdColorF){255, 0, 255, 1} : (GdColorF){0, 255, 0, 1};
+        GdColorF c = mix_colour(white, orb, p->boom_age / 0.3f);
+        c.a = fminf(1.0f, fmaxf(0.0f, 1.0f - (p->boom_age - 0.2f) / 0.3f));
+        if (f) gfx_frame(g, f, trail_sx(gm, p->boom_x), trail_sy(gm, p->boom_y), p->dash_angle, 1.2f * s, 1.2f * s, c, 1);
+    }
+    if (p->off_age > 0) {   // shrinks to a fifth, drifts back and fades
+        const float k = p->off_age / 0.2f, a = p->off_angle * 3.14159265f / 180.0f, size = 1.0f - 0.8f * k;
+        GdColorF c = colour;
+        c.a = 1.0f - k;
+        draw_flame(g, 1, trail_sx(gm, p->off_x) - cosf(a) * 20.0f * k * scale,
+                   trail_sy(gm, p->off_y) - sinf(a) * 20.0f * k * scale, p->off_angle, 0.99f * size * s,
+                   0.96f * size * s, c);
+    }
+    if (p->dash_age > 0) {
+        const float t = p->dash_age;
+        // it shoots out in the first fifth of a second, overshooting in height
+        float sx = 0.99f, sy = 0.96f;
+        if (t < 0.1f) {
+            const float k = t / 0.1f;
+            sx = 0.3f + (0.891f - 0.3f) * k; sy = 0.2f + (1.152f - 0.2f) * k;
+        } else if (t < 0.2f) {
+            const float k = (t - 0.1f) / 0.1f;
+            sx = 0.891f + (0.99f - 0.891f) * k; sy = 1.152f + (0.96f - 1.152f) * k;
+        }
+        draw_flame(g, 1 + (int)(t / 0.04f) % 12, x, y, p->dash_angle, sx * s, sy * s,
+                   mix_colour(white, colour, (t - 0.1f) / 0.2f));
+    }
+}
 
 static void draw_trail(Game *gm, Gfx *g, const Player *p, float scale, int swap)
 {
@@ -3180,8 +3352,8 @@ static float edge_effect(const Game *gm, const Gfx *g, Obj *o, float vw, float s
     case 26: *cx += off; break;
     case 27: o->sx *= t; o->sy *= t; break;
     case 28: o->sx *= 1.0f + 0.75f * (1.0f - t); o->sy *= 1.0f + 0.75f * (1.0f - t); break;
-    case 58: *cy += *cy < g->h * 0.5f ? -off : off; break;   // the two halves of the screen drift apart
-    case 59: *cy += *cy < g->h * 0.5f ? off : -off; break;   // ... or come together
+    case 58: *cy += *cy < 160.0f * scale ? -off : off; break;   // the two halves of the screen drift apart
+    case 59: *cy += *cy < 160.0f * scale ? off : -off; break;   // ... or come together
     default: break;
     }
     return no_fade ? 1.0f : t;
@@ -3195,13 +3367,64 @@ static float invisible_alpha(const Game *gm, const Obj *o)
     return 0.05f + 0.75f * fminf(fmaxf((d - 70.0f) / 130.0f, 0.0f), 1.0f);
 }
 
+// Frame of a spinning coin; coins the player owns already show as an outline.
+static const GdFrame *coin_frame(Gfx *g, int user, int owned, int n)
+{
+    char name[48];
+    snprintf(name, sizeof name, "secretCoin_%s%s01_%03d.png", user ? "2_" : "", owned ? "b_" : "", 1 + (n & 3));
+    return gfx_find(g, name);
+}
+
+// Picked up coins hop out of the level while two rings spread from the place.
+static void draw_coin_fly(Game *gm, Gfx *g, float scale)
+{
+    for (int k = 0; k < GD_MAX_COINS; k++) {
+        const CoinFly *c = &gm->coin_fly[k];
+        if (c->age <= 0) continue;
+        const float t = c->age, ring = t / 0.3f;
+        if (ring < 1.0f) {
+            const GdColorF white = c->user ? (GdColorF){200, 200, 200, 1} : (GdColorF){255, 225, 90, 1};
+            for (int w = 0; w < 2; w++) {
+                const float radius = (5.0f + ((w ? 60.0f : 25.0f) - 5.0f) * ring) * scale, thick = 2.5f * scale;
+                const float x = trail_sx(gm, c->x), y = trail_sy(gm, c->y);
+                GdColorF q = white;
+                q.a = 1.0f - ring;
+                const GdColorF col[4] = {q, q, q, q};
+                for (int i = 0; i < 28; i++) {
+                    const float a = i * 6.2831853f / 28.0f, b = (i + 1) * 6.2831853f / 28.0f;
+                    const float px[4] = {x + cosf(a) * radius, x + cosf(b) * radius, x + cosf(b) * (radius - thick),
+                                         x + cosf(a) * (radius - thick)};
+                    const float py[4] = {y + sinf(a) * radius, y + sinf(b) * radius, y + sinf(b) * (radius - thick),
+                                         y + sinf(a) * (radius - thick)};
+                    gfx_quad_colors(g, px, py, col, 1);
+                }
+            }
+        }
+        const GdFrame *f = coin_frame(g, c->user, c->owned, (int)(t / 0.05f));
+        const float s = scale / g->atlas.px_per_unit;
+        const GdColorF col = {255, 255, 255, fminf(1.0f, fmaxf(0.0f, (COIN_FLY_TIME - t) / 0.3f))};
+        if (f) gfx_frame(g, f, trail_sx(gm, c->x + c->drift * t), trail_sy(gm, c->y + 260.0f * t - 360.0f * t * t), 0,
+                         s, s, col, 0);
+    }
+}
+
 static void draw_obj_fx(Game *gm, Gfx *g, const Obj *o, float vw, float scale, float cx, float cy, float s, int pass)
 {
     if (o->type == OT_PORTAL) { draw_obj_layer(gm, g, o, cx, cy, s, pass); return; }
     Obj e = *o;
-    g->fade = edge_effect(gm, g, &e, vw, scale, &cx, &cy) * invisible_alpha(gm, o);
+    if (o->type == OT_COIN) {
+        if (o->used) return;   // picked up
+        const int k = coin_number(gm, o);
+        e.main = coin_frame(g, o->id == 1329, k >= 0 && ((gm->coins_owned >> k) & 1), (int)(gm->anim_t / 0.12f));
+        if (!e.main) e.main = o->main;
+    }
+    const float seen = motion_apply(gm, (int)(o - gm->obj), &e);
+    cx += (e.x - o->x) * scale;
+    cy -= (e.y - o->y) * scale;
+    g->fade = edge_effect(gm, g, &e, vw, scale, &cx, &cy) * invisible_alpha(gm, o) * seen;
     draw_obj_layer(gm, g, &e, cx, cy, s, pass);
     g->fade = 1;
+    gm->tinted = NULL;
 }
 
 // The ground darkens towards both screen edges. `edge` is the screen y of the ground line;
@@ -3218,21 +3441,52 @@ static void ground_shade(Gfx *g, float ox, float edge, float W, float scale, int
     gfx_frame(g, f, ox + W - hw + scale, y, 0, -kx, ceiling ? -ky : ky, c, 0);
 }
 
+// The layers the shader effects reach, numbered as by their setup trigger: 1 background,
+// 2 middleground, 3-7 the object layers behind the icon, 8 the icon, 9-12 those in front of it,
+// 13 ground, 14 what is fixed to the screen.
+typedef struct { int bottom, top, open, done; } ShaderSpan;
+
 // what the object passes need to know about the picture
-typedef struct { float left, right, vw, vh, scale, ox, oy, s; } View;
+typedef struct { float left, right, vw, vh, scale, ox, oy, s; ShaderSpan *span; } View;
+
+// To be called before something of layer `layer` is drawn (in rising order).
+static void shader_layer(Game *gm, Gfx *g, const View *v, int layer)
+{
+    ShaderSpan *p = v->span;
+    if (p->done) return;
+    if (layer > p->top) {
+        // with a lowest layer above the middleground the effects work on a layer of their own
+        if (p->open) visual_shaders(gm, g, v->ox, v->oy, v->vw, v->vh, v->scale, 1);
+        else if (p->bottom <= 2) visual_shaders(gm, g, v->ox, v->oy, v->vw, v->vh, v->scale, 0);
+        p->done = 1;
+    } else if (!p->open && p->bottom > 2 && layer >= p->bottom) {
+        gfx_layer_begin(g);
+        p->open = 1;
+    }
+}
 
 static int in_view(const View *v, const Obj *o)
 {
-    return !(o->type == OT_TRIGGER || o->off || o->nodraw || o->x < v->left || o->x > v->right);
+    return !(o->type == OT_TRIGGER || o->off || o->nodraw || o->on_screen || o->x < v->left || o->x > v->right);
 }
 
 // Objects in draw order: pass 0 the layers behind the icon (and the back halves of portals), pass 1
 // those in front of it. Within one layer all colour sprites that lie below come first.
+void gm_draw_object(Game *gm, Gfx *g, const Obj *o, float cx, float cy, float s)
+{
+    draw_obj_layer(gm, g, o, cx, cy, s, 0);
+    if (o->type == OT_PORTAL) draw_obj_layer(gm, g, o, cx, cy, s, 1);
+}
+
 static void draw_layers(Game *gm, Gfx *g, const View *v, int front)
 {
     for (int k = 0, end; k < gm->n; k = end) {
         const int layer = gm->obj[gm->by_z[k]].zlayer;
         for (end = k + 1; end < gm->n && gm->obj[gm->by_z[end]].zlayer == layer; end++) {}
+        // z layers -5, -3, .. 3 lie behind the icon, 5 .. 11 in front of it
+        const int behind = (layer + 5) / 2 + 3, before = (layer - 5) / 2 + 9;
+        if (front) { if (layer >= 5) shader_layer(gm, g, v, before < 12 ? before : 12); }
+        else if (layer < 5) shader_layer(gm, g, v, behind < 3 ? 3 : behind > 7 ? 7 : behind);
         for (gm->draw_under = 1; gm->draw_under >= 0; gm->draw_under--)
             for (int j = k; j < end; j++) {
                 const Obj *o = &gm->obj[gm->by_z[j]];
@@ -3246,11 +3500,103 @@ static void draw_layers(Game *gm, Gfx *g, const View *v, int front)
     gm->draw_under = 0;
 }
 
+// Turns the picture of the following camera into the one the camera triggers ask for: zoom, offset,
+// edges and static camera, all around the middle of the view.
+static void camera_apply(Game *gm, float *vw, float *vh, float *scale)
+{
+    const Camera *v = &gm->view;
+    const float zoom = fmaxf(trg_tween(&v->zoom), 0.05f);
+    const float offx = trg_tween(&v->offx) - trg_tween(&v->shiftx), offy = trg_tween(&v->offy) - trg_tween(&v->shifty);
+    int moved = zoom != 1.0f || offx != 0 || offy != 0;
+    for (int i = 0; i < 2; i++) moved |= trg_tween(&v->hold[i]) > 0;
+    for (int i = 0; i < 4; i++) moved |= trg_tween(&v->bound[i]) > 0;
+    if (!moved) return;
+    float c[2] = {gm->cam_x + *vw * 0.5f + offx, gm->cam_bottom + *vh * 0.5f + offy};
+    *vw /= zoom;
+    *vh /= zoom;
+    *scale *= zoom;
+    for (int side = 0; side < 4; side++) {   // left, right, up, down
+        const float w = trg_tween(&v->bound[side]);
+        const Obj *o = trg_first(gm, v->edge[side]);
+        if (w <= 0 || !o) continue;
+        const int axis = side >= 2, low = side == 0 || side == 3;
+        const float half = 0.5f * (axis ? *vh : *vw);
+        const float limit = (axis ? o->y : o->x) + (low ? half : -half);
+        if (low ? c[axis] < limit : c[axis] > limit) c[axis] += (limit - c[axis]) * w;
+    }
+    for (int axis = 0; axis < 2; axis++) {
+        const float w = trg_tween(&v->hold[axis]);
+        if (w > 0) c[axis] += (trg_static_pos(gm, axis) - c[axis]) * w;
+    }
+    gm->cam_x = c[0] - *vw * 0.5f;
+    gm->cam_bottom = c[1] - *vh * 0.5f;
+}
+
+void game_screen_pos(const Game *gm, float x, float y, float *sx, float *sy)
+{
+    float px = gm->pic.ox + (x - gm->pic.x) * gm->pic.scale;
+    float py = gm->pic.oy + (gm->pic.vh - (y - gm->pic.bottom)) * gm->pic.scale;
+    if (gm->pic.mirror) px = gm->pic.ox * 2 + gm->pic.w - px;
+    const float mx = gm->pic.ox + gm->pic.w * 0.5f, my = gm->pic.oy + gm->pic.vh * gm->pic.scale * 0.5f;
+    *sx = mx + (px - mx) * gm->pic.turn_cos - (py - my) * gm->pic.turn_sin;
+    *sy = my + (px - mx) * gm->pic.turn_sin + (py - my) * gm->pic.turn_cos;
+}
+
+// The gradients shown on the layers from..to (1 background, 2 middleground, 3-7 behind the icon,
+// 8 icon, 9-12 in front of it, 13 ground, above that everything).
+static void draw_gradients(Game *gm, Gfx *g, const View *v, float margin, int from, int to)
+{
+    for (int id = 0; id < GD_MAX_GRADIENTS; id++) {
+        const int at = gm->grad[id] - 1;
+        if (at < 0 || at >= gm->ngradients) continue;
+        const Gradient *d = &gm->gradients[at];
+        if (d->layer < from || d->layer > to) continue;
+        const Obj *t = &gm->obj[d->obj];
+        float alpha = 1;
+        for (int k = 0; k < t->ngrp; k++) alpha *= gm->galpha[t->grp[k]];
+        if (alpha <= 0.003f) continue;
+        const float extra = margin / v->scale;
+        float x[4], y[4];   // top left, top right, bottom right, bottom left in the level
+        if (d->vertex) {   // the groups mark: bottom left and right, top left and right
+            static const int group[4] = {2, 3, 1, 0};
+            int all = 1;
+            for (int i = 0; i < 4; i++) {
+                const Obj *o = trg_first(gm, d->side[group[i]]);
+                if (o) { x[i] = o->x; y[i] = o->y; } else all = 0;
+            }
+            if (!all) continue;
+        } else {
+            const Obj *up = trg_first(gm, d->side[0]), *down = trg_first(gm, d->side[1]);
+            const Obj *left = trg_first(gm, d->side[2]), *right = trg_first(gm, d->side[3]);
+            const float l = left ? left->x : gm->cam_x - extra, r = right ? right->x : gm->cam_x + v->vw + extra;
+            const float top = up ? up->y : gm->cam_bottom + v->vh + extra;
+            const float low = down ? down->y : gm->cam_bottom - extra;
+            x[0] = x[3] = l; x[1] = x[2] = r;
+            y[0] = y[1] = top; y[2] = y[3] = low;
+        }
+        float add;
+        const GdColorF a = chan_color(gm, d->ch1 > 0 ? d->ch1 : CH_WHITE, &add);
+        const GdColorF b = chan_color(gm, d->ch2 > 0 ? d->ch2 : CH_WHITE, &add);
+        // the first colour fades into the second along the trigger's direction (unturned: to the right)
+        const float dir = -d->rot * 3.14159265f / 180.0f, dx = cosf(dir), dy = sinf(dir);
+        float px[4], py[4];
+        GdColorF c[4];
+        for (int i = 0; i < 4; i++) {
+            const float u = i == 1 || i == 2 ? 1.0f : -1.0f, w = i < 2 ? 1.0f : -1.0f;
+            const float k = fminf(fmaxf(0.5f + 0.5f * (u * dx + w * dy), 0.0f), 1.0f);
+            c[i] = (GdColorF){a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k, a.b + (b.b - a.b) * k,
+                              (a.a + (b.a - a.a) * k) * alpha};
+            px[i] = v->ox + (x[i] - gm->cam_x) * v->scale;
+            py[i] = v->oy + (v->vh - (y[i] - gm->cam_bottom)) * v->scale;
+        }
+        gfx_quad_colors(g, px, py, c, d->blend >= 0 && d->blend <= 3 ? d->blend : 0);
+    }
+}
+
 void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, float oy,
                const GfxImage *bg, const GfxImage *ground)
 {
     const float ppu = g->atlas.px_per_unit;
-    const float s = scale / ppu; // screen px per sheet px
     const float W = vw * scale, H = vh * scale;
     float al = gm->acc / STEP;
     if (al > 1) al = 1;
@@ -3263,19 +3609,38 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     float target = gm->mirror != (gm->frame.fx < 0) ? vw - lead : lead;
     if (gm->frame.fx == 0) target = vw * 0.5f;
     if (gm->time < 0.02f) gm->mir_x = target;
-    gm->mir_x += (target - gm->mir_x) * 0.06f;
+    // 6 % of the way per 60th of a second, whatever the frame rate
+    float since = gm->anim_t - gm->mir_t;
+    if (since < 0 || since > 0.25f) since = 1.0f / 60.0f;
+    gm->mir_t = gm->anim_t;
+    gm->mir_x += (target - gm->mir_x) * (1.0f - powf(0.94f, since * 60.0f));
     gm->cam_x = ix - (gm->mirror ? vw - gm->mir_x : gm->mir_x);
     // at the start the camera waits until the icon has reached its place
     if (!gm->mirror && gm->frame.fx > 0 && gm->cam_x < 0) gm->cam_x = 0;
-    float shake_x = 0, shake_y = 0;
-    if (gm->shake_left > 0) {
+    // the following camera stays as it is; what the picture shows instead is only used below
+    const float follow_x = gm->cam_x, follow_bottom = gm->cam_bottom, base_scale = scale;
+    camera_apply(gm, &vw, &vh, &scale);
+    const float s = scale / ppu; // screen px per sheet px
+    if (gm->shake_left > 0 && !g->no_shake) {
         const float every = gm->shake_every > 0.001f ? gm->shake_every : 1.0f / 60.0f;
         const float jolt = floorf(gm->anim_t / every);
-        shake_x = sinf(jolt * 91.7f) * gm->shake_amp;
-        shake_y = sinf(jolt * 47.3f + 2.0f) * gm->shake_amp;
-        gm->cam_x += shake_x;
-        gm->cam_bottom += shake_y;
+        gm->cam_x += sinf(jolt * 91.7f) * gm->shake_amp;
+        gm->cam_bottom += sinf(jolt * 47.3f + 2.0f) * gm->shake_amp;
     }
+    // camera rotation: everything is drawn turned, so more of the level shows towards the corners
+    const float turn = trg_tween(&gm->view.turn) * 3.14159265f / 180.0f;
+    float margin = 0;
+    g->turned = fabsf(turn) > 0.0002f;
+    if (g->turned) {
+        g->turn_x = ox + W * 0.5f;
+        g->turn_y = oy + H * 0.5f;
+        g->turn_cos = cosf(turn);
+        g->turn_sin = sinf(turn);
+        margin = ceilf(0.5f * (hypotf(W, H) - H));
+    }
+    gm->pic.x = gm->cam_x; gm->pic.bottom = gm->cam_bottom; gm->pic.vh = vh; gm->pic.scale = scale;
+    gm->pic.ox = ox; gm->pic.oy = oy; gm->pic.w = W; gm->pic.mirror = gm->mirror;
+    gm->pic.turn_cos = g->turned ? g->turn_cos : 1; gm->pic.turn_sin = g->turned ? g->turn_sin : 0;
     g_ox = ox; g_oy = oy; g_vh = vh; g_scale = scale;
     SDL_Rect clip = {(int)ox, (int)oy, (int)W, (int)H};
     gfx_set_clip(g, &clip);
@@ -3285,43 +3650,58 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     float add;
     GdColorF bgc = chan_color(gm, CH_BG, &add);
     bgc.a = 1;
-    gfx_fill(g, (SDL_FRect){ox, oy, W, H}, bgc);
+    gfx_fill(g, (SDL_FRect){ox - margin, oy - margin, W + 2 * margin, H + 2 * margin}, bgc);
     if (bg && bg->tex) {
-        // as in the original: much taller than the view (1024 / 1.875 units), bottom aligned
-        const float step = 1024.0f / 1.875f * scale;
-        float off = fmodf((gm->cam_x * 0.1f - 1.6f) * scale, step);
+        // as in the original: much taller than the view (1024 / 1.875 units), bottom aligned; the
+        // zoom does not change its size
+        const float step = 1024.0f / 1.875f * base_scale;
+        float off = fmodf((gm->cam_x * gm->view.bg_mx - 1.6f) * base_scale, step);
         if (off < 0) off += step;
-        for (float x = -off; x < W; x += step) {
+        for (float x = -off - ceilf(margin / step) * step; x < W + margin; x += step) {
             gfx_image_rect(g, bg, (SDL_FRect){0, 0, (float)bg->w, (float)bg->h},
-                           (SDL_FRect){ox + x, oy + H - step + 0.4f * scale, step, step}, bgc);
+                           (SDL_FRect){ox + x, oy + H - step + 0.4f * base_scale, step, step}, bgc);
         }
     }
 
+    // gradients on the background layer, then the middleground
     // world -> screen
     #define SX(x) (ox + ((x) - gm->cam_x) * scale)
     #define SY(y) (oy + (vh - ((y) - gm->cam_bottom)) * scale)
 
     // glow of all visible objects first, so that it only shows around them
-    float view_l = gm->cam_x - 120, view_r = gm->cam_x + vw + 120;
-    for (int k = 0; k < gm->n; k++) {
+    float view_l = gm->cam_x - 120 - margin / scale, view_r = gm->cam_x + vw + 120 + margin / scale;
+    for (int k = 0; k < gm->n && !g->no_glow; k++) {
         const Obj *o = &gm->obj[gm->by_z[k]];
-        if (!o->glow || o->off || o->nodraw || o->x < view_l || o->x > view_r) continue;
+        if (!o->glow || o->off || o->nodraw || o->on_screen || o->x < view_l || o->x > view_r) continue;
         Obj e = *o;
         float ex = SX(o->x), ey = SY(o->y);
-        g->fade = edge_effect(gm, g, &e, vw, scale, &ex, &ey) * invisible_alpha(gm, o);
+        const float seen = motion_apply(gm, gm->by_z[k], &e);
+        ex += (e.x - o->x) * scale;
+        ey -= (e.y - o->y) * scale;
+        g->fade = edge_effect(gm, g, &e, vw, scale, &ex, &ey) * invisible_alpha(gm, o) * seen;
         draw_glow(gm, g, &e, ex, ey, s);
         g->fade = 1;
+        gm->tinted = NULL;
     }
 
-    const View v = {view_l, view_r, vw, vh, scale, ox, oy, s};
+    ShaderSpan span = {gm->view.shader_bottom, gm->view.shader_top > 0 ? gm->view.shader_top : 14, 0, 0};
+    const View v = {view_l, view_r, vw, vh, scale, ox, oy, s, &span};
 
+    motion_areas(gm, gm->cam_x - margin / scale, gm->cam_x + vw + margin / scale);
+    draw_gradients(gm, g, &v, margin, 0, 1);
+    shader_layer(gm, g, &v, 2);
+    visual_middleground(gm, g, ox, oy, W, H, margin, scale);
+    draw_gradients(gm, g, &v, margin, 2, 2);
     // pass 0: back layers
     draw_layers(gm, g, &v, 0);
+    visual_particles(gm, g, 0, ox, oy, vw, vh, scale);
+    draw_gradients(gm, g, &v, margin, 3, 8);
 
+    shader_layer(gm, g, &v, 8);
     // images of the ghost trail, behind the icon and shrinking as they fade
     for (int i = 0; i < GD_GHOSTS; i++) {
         const Ghost *q = &gm->ghost[i];
-        if (q->age <= 0) continue;
+        if (q->age <= 0 || gm->view.hidden) continue;
         // the main layer of the form, in the first colour, added onto the picture
         const int form = q->mode == M_SHIP ? IC_SHIP : q->mode == M_BALL ? IC_BALL : q->mode == M_UFO ? IC_UFO
                        : q->mode == M_WAVE ? IC_WAVE : q->mode == M_SWING ? IC_SWING : IC_CUBE;
@@ -3334,11 +3714,18 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     }
 
     // player
-    if (!gm->p.dead) {
-        draw_trail(gm, g, &gm->p, scale, 0);
-        if (gm->dual) draw_trail(gm, g, &gm->p2, scale, 1);
-        if (gm->dual) draw_icon(gm, g, &gm->p2, SX(gm->p2.x), SY(gm->p2.y), gm->p2.rot, s, scale, 1);
-        draw_icon(gm, g, &gm->p, SX(ix), SY(iy), irot, s, scale, 0);
+    if (gm->view.hidden) {
+        // a trigger has hidden the icon
+    } else if (!gm->p.dead) {
+        const int show1 = !(gm->logic.options & OPT_HIDE_P1), show2 = gm->dual && !(gm->logic.options & OPT_HIDE_P2);
+        if (show1) draw_trail(gm, g, &gm->p, scale, 0);
+        if (show2) draw_trail(gm, g, &gm->p2, scale, 1);
+        if (show1 && gm->p.mode != M_WAVE) draw_streak(gm, g, &gm->p, ix, iy, scale, 0);
+        if (show2 && gm->p2.mode != M_WAVE) draw_streak(gm, g, &gm->p2, gm->p2.x, gm->p2.y, scale, 1);
+        if (show2) draw_dash(gm, g, &gm->p2, SX(gm->p2.x), SY(gm->p2.y), scale, 1);
+        if (show1) draw_dash(gm, g, &gm->p, SX(ix), SY(iy), scale, 0);
+        if (show2) draw_icon(gm, g, &gm->p2, SX(gm->p2.x), SY(gm->p2.y), gm->p2.rot, s, scale, 1);
+        if (show1) draw_icon(gm, g, &gm->p, SX(ix), SY(iy), irot, s, scale, 0);
     } else {
         // simple burst of squares
         float t = gm->p.dead_t;
@@ -3356,7 +3743,7 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
     // particles (additive soft discs)
     {
         const GdFrame *pf = gfx_find(g, "particle_02_001.png"), *pring = gfx_find(g, "particle_07_001.png");
-        for (int i = 0; i < gm->npt; i++) {
+        for (int i = 0; i < gm->npt && !g->no_particles; i++) {
             const Particle *p = &gm->pt[i];
             float k = p->life / p->max;
             GdColorF pc = {p->r, p->g, p->b, p->a * k};
@@ -3378,77 +3765,90 @@ void game_draw(Game *gm, Gfx *g, float vw, float vh, float scale, float ox, floa
 
     // pass 1: front layers and portal fronts
     draw_layers(gm, g, &v, 1);
+    draw_coin_fly(gm, g, scale);
     // the tabs lie above all portals (overlapping ones would hide them otherwise)
     for (int k = 0; k < gm->n; k++) {
         const Obj *o = &gm->obj[gm->by_z[k]];
         if (o->type == OT_PORTAL && o->fx1 && in_view(&v, o)) draw_portal_tab(gm, g, o, SX(o->x), SY(o->y), s);
     }
+    visual_particles(gm, g, 1, ox, oy, vw, vh, scale);
+    draw_gradients(gm, g, &v, margin, 9, 12);
+    shader_layer(gm, g, &v, 13);
     // ground and ceiling cover whatever reaches into them (fixed tile size: it must not stretch
     // with the camera height)
     GdColorF gc = chan_color(gm, CH_GROUND, &add);
     gc.a = 1;
     float tile = (ground && ground->tex) ? ground->w / ppu * scale : 128.0f * scale;
     float gy = SY(gm->ground_y + 0.6f);       // the ground reaches slightly above the physics floor
-    if (gy < oy + H) {
+    const float beyond = ceilf(margin / tile) * tile;   // further tiles for a turned picture
+    const int no_ground = (gm->logic.options & OPT_HIDE_GROUND) != 0;
+    if (gy < oy + H + margin && !no_ground) {
         float off = fmodf((gm->cam_x - 15.0f) * scale, tile);   // tiles start half a block in
         if (off < 0) off += tile;
         if (ground && ground->tex) {
-            for (float y = gy; y < oy + H; y += tile)
-                for (float x = -off; x < W; x += tile)
+            for (float y = gy; y < oy + H + margin; y += tile)
+                for (float x = -off - beyond; x < W + margin; x += tile)
                     gfx_image_rect(g, ground, (SDL_FRect){0, 0, (float)ground->w, (float)ground->h},
                                    (SDL_FRect){ox + x, y, tile, tile}, gc);
         } else {
-            gfx_fill(g, (SDL_FRect){ox, gy, W, oy + H - gy}, gc);
+            gfx_fill(g, (SDL_FRect){ox - margin, gy, W + 2 * margin, oy + H + margin - gy}, gc);
         }
         const GfxImage *g2 = gm->ground2;
         if (g2 && g2->tex) {
             GdColorF c2 = chan_color(gm, CH_GROUND2, &add);
             c2.a = 1;
-            for (float x = -off; x < W; x += tile)
+            for (float x = -off - beyond; x < W + margin; x += tile)
                 gfx_image_rect(g, g2, (SDL_FRect){0, 0, (float)g2->w, (float)g2->h},
                                (SDL_FRect){ox + x, gy, tile, tile * g2->h / g2->w}, c2);
         }
-        ground_shade(g, ox, gy, W, scale, 0);
+        ground_shade(g, ox - margin, gy, W + 2 * margin, scale, 0);
         const GdFrame *line = gfx_find(g, "floorLine_01_001.png");
         if (line) {
             GdColorF lc = chan_color(gm, CH_LINE, &add);
-            gfx_frame(g, line, ox + W * 0.5f, gy, 0, W / (float)line->w, s, lc, 1);
+            gfx_frame(g, line, ox + W * 0.5f, gy, 0, (W + 2 * margin) / (float)line->w, s, lc, 1);
         }
     }
-    if (gm->has_ceil) {
+    if (gm->has_ceil && !no_ground) {
         float cy = SY(gm->ceil_y - 0.6f);
-        if (cy > oy) {
+        if (cy > oy - margin) {
             float off = fmodf((gm->cam_x - 15.0f) * scale, tile);
             if (off < 0) off += tile;
             if (ground && ground->tex) {
-                for (float y = cy; y > oy - tile; y -= tile)
-                    for (float x = -off; x < W; x += tile)
+                for (float y = cy; y > oy - tile - margin; y -= tile)
+                    for (float x = -off - beyond; x < W + margin; x += tile)
                         gfx_image_rect(g, ground, (SDL_FRect){0, (float)ground->h, (float)ground->w, -(float)ground->h},
                                        (SDL_FRect){ox + x, y - tile, tile, tile}, gc);
             } else {
-                gfx_fill(g, (SDL_FRect){ox, oy, W, cy - oy}, gc);
+                gfx_fill(g, (SDL_FRect){ox - margin, oy - margin, W + 2 * margin, cy - oy + margin}, gc);
             }
             const GfxImage *g2 = gm->ground2;
             if (g2 && g2->tex) {
                 GdColorF c2 = chan_color(gm, CH_GROUND2, &add);
                 c2.a = 1;
-                for (float x = -off; x < W; x += tile)
+                for (float x = -off - beyond; x < W + margin; x += tile)
                     gfx_image_rect(g, g2, (SDL_FRect){0, (float)g2->h, (float)g2->w, -(float)g2->h},
                                    (SDL_FRect){ox + x, cy - tile * g2->h / g2->w, tile, tile * g2->h / g2->w}, c2);
             }
-            ground_shade(g, ox, cy, W, scale, 1);
+            ground_shade(g, ox - margin, cy, W + 2 * margin, scale, 1);
             const GdFrame *line = gfx_find(g, "floorLine_01_001.png");
             if (line) {
                 GdColorF lc = chan_color(gm, CH_LINE, &add);
-                gfx_frame(g, line, ox + W * 0.5f, cy, 0, W / (float)line->w, -s, lc, 1);
+                gfx_frame(g, line, ox + W * 0.5f, cy, 0, (W + 2 * margin) / (float)line->w, -s, lc, 1);
             }
         }
     }
 
+    draw_gradients(gm, g, &v, margin, 13, 13);
+    shader_layer(gm, g, &v, 14);
+    visual_screen_objects(gm, g, ox, oy, vw, vh, scale);
+    shader_layer(gm, g, &v, 99);   // apply what has not been applied yet
+    draw_gradients(gm, g, &v, margin, 14, 99);
+
     #undef SX
     #undef SY
-    gm->cam_x -= shake_x;
-    gm->cam_bottom -= shake_y;
+    gm->cam_x = follow_x;
+    gm->cam_bottom = follow_bottom;
+    g->turned = 0;
     g->mirror = 0;
     gfx_set_clip(g, NULL);
 }
@@ -3510,6 +3910,7 @@ void game_rewind(Game *gm, const GameSnap *s)
         const UndoEntry *u = &gm->undo[--gm->nundo];
         Obj *o = &gm->obj[u->obj];
         o->x = u->x; o->y = u->y; o->rot = u->rot;
+        if (o->kx != u->kx || o->ky != u->ky) gm_obj_scale(o, u->kx / o->kx, u->ky / o->ky);
         o->used = u->used; o->used2 = u->used2; o->tdone = u->tdone; o->off = u->off;
     }
 }
@@ -3536,12 +3937,13 @@ void game_snap_save(const Game *gm, GameSnap *s, float x0, float x1)
     if (s->nm > s->mcap) {
         free(s->mpos); free(s->mflags);
         s->mcap = s->nm + 64;
-        s->mpos = malloc((size_t)s->mcap * 3 * sizeof(float));
+        s->mpos = malloc((size_t)s->mcap * 5 * sizeof(float));
         s->mflags = malloc((size_t)s->mcap * 4);
     }
     for (int i = 0; i < s->nm; i++) {
         const Obj *o = &gm->obj[gm->movers[i]];
-        s->mpos[i * 3] = o->x; s->mpos[i * 3 + 1] = o->y; s->mpos[i * 3 + 2] = o->rot;
+        float *m = &s->mpos[i * 5];
+        m[0] = o->x; m[1] = o->y; m[2] = o->rot; m[3] = o->kx; m[4] = o->ky;
         s->mflags[i * 4] = (unsigned char)o->used;
         s->mflags[i * 4 + 1] = (unsigned char)o->used2;
         s->mflags[i * 4 + 2] = (unsigned char)o->tdone;
@@ -3562,8 +3964,10 @@ void game_snap_restore(Game *gm, const GameSnap *s)
     }
     for (int i = 0; i < s->nm; i++) {
         Obj *o = &gm->obj[gm->movers[i]];
-        o->x = s->mpos[i * 3]; o->y = s->mpos[i * 3 + 1];
-        if (o->spin == 0) o->rot = s->mpos[i * 3 + 2];
+        const float *m = &s->mpos[i * 5];
+        o->x = m[0]; o->y = m[1];
+        if (o->spin == 0) o->rot = m[2];
+        if (o->kx != m[3] || o->ky != m[4]) gm_obj_scale(o, m[3] / o->kx, m[4] / o->ky);
         o->used = s->mflags[i * 4];
         o->used2 = s->mflags[i * 4 + 1];
         o->tdone = s->mflags[i * 4 + 2];
@@ -3607,6 +4011,10 @@ void game_checkpoint_save(const Game *gm, GameCheckpoint *c)
     memcpy(c->ch, gm->ch, sizeof gm->ch);
     c->cam_bottom = gm->cam_bottom; c->ground_y = gm->ground_y; c->ceil_y = gm->ceil_y;
     c->mir_x = gm->mir_x; c->cam_x = gm->cam_x; c->percent = gm->percent; c->has_ceil = gm->has_ceil;
+    c->view = gm->view;
+    memcpy(c->grad, gm->grad, sizeof gm->grad);
+    memcpy(c->area, gm->area, sizeof gm->area);
+    c->narea = gm->narea;
     c->valid = 1;
 }
 
@@ -3618,6 +4026,10 @@ void game_checkpoint_restore(Game *gm, const GameCheckpoint *c)
     memcpy(gm->galpha, c->galpha, sizeof gm->galpha);
     gm->cam_bottom = c->cam_bottom; gm->ground_y = c->ground_y; gm->ceil_y = c->ceil_y;
     gm->mir_x = c->mir_x; gm->cam_x = c->cam_x; gm->percent = c->percent; gm->has_ceil = c->has_ceil;
+    gm->view = c->view;
+    memcpy(gm->grad, c->grad, sizeof gm->grad);
+    memcpy(gm->area, c->area, sizeof gm->area);
+    gm->narea = c->narea;
     gm->finished = 0;
 }
 
@@ -3638,9 +4050,12 @@ int game_state_io(Game *gm, const char *path, int save)
     IO(gm->has_ceil); IO(gm->enter_fx); IO(gm->ch); IO(gm->galpha); IO(gm->mv); IO(gm->nmv); IO(gm->sp);
     IO(gm->nsp); IO(gm->pu); IO(gm->npu); IO(gm->af); IO(gm->naf);
     IO(gm->frame); IO(gm->next_frame); IO(gm->travel); IO(gm->timewarp); IO(gm->channel); IO(gm->free); IO(gm->logic);
+    IO(gm->view); IO(gm->grad); IO(gm->area); IO(gm->narea); IO(gm->keep); IO(gm->nkeep);
     for (int i = 0; ok && i < gm->n; i++) {
         Obj *o = &gm->obj[i];
-        IO(o->x); IO(o->y); IO(o->rot); IO(o->used); IO(o->used2); IO(o->tdone); IO(o->off);
+        float kx = o->kx, ky = o->ky;
+        IO(o->x); IO(o->y); IO(o->rot); IO(o->used); IO(o->used2); IO(o->tdone); IO(o->off); IO(kx); IO(ky);
+        if (ok && (kx != o->kx || ky != o->ky)) gm_obj_scale(o, kx / o->kx, ky / o->ky);
     }
 #undef IO
     fclose(f);
